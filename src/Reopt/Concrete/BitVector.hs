@@ -1,35 +1,31 @@
-{-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE TypeOperators #-}
+-- NOTE: This file is currently unused
 
-module Reopt.Concrete.BitVector
-  (
+module Reopt.Concrete.BitVector (
   -- | The constructor is not exported; use 'bitVector' and 'unBitVector'.
-    BitVector
-  , bitVector
-  , unBitVector
+  BitVector,
+  bitVector,
+  unBitVector,
   -- | Constants.
-  , false
-  , true
+  false,
+  true,
   -- | Operations.
-  , (#)
-  , group
-  , modify
-  , nat
-  , width
+  (#),
+  group,
+  modify,
+  nat,
+  width,
   -- | To construct 'BV.BV' values.
-  , BV
-  , BV.bitVec
-  ) where
+  BV,
+  BV.bitVec,
+) where
 
-import           Data.BitVector (BV)
-import qualified Data.BitVector as BV
-import           Data.Parameterized.Classes (OrdF(..), OrderingF(..), fromOrdering)
-import           Data.Parameterized.NatRepr
+import Data.BitVector (BV)
+import Data.BitVector qualified as BV
+import Data.Parameterized.Classes (OrdF (..), OrderingF (..), fromOrdering)
+import Data.Parameterized.NatRepr
 
-import           Control.Monad (guard)
-import           GHC.TypeLits
+import Control.Monad (guard)
+import GHC.TypeLits
 
 ------------------------------------------------------------------------
 -- Bitvector type
@@ -51,24 +47,25 @@ data BitVector (n :: Nat) where
 bitVector :: NatRepr n -> BV -> BitVector n
 bitVector nr v =
   if natValue nr == fromIntegral (BV.width v)
-  -- Internally, 'BV' attempts to convert all values to non-negative,
-  -- by adding negative values to @2^n@. We first check if this
-  -- conversion to unsigned overflowed.
-  --
-  -- We don't detect too-small negative values in
-  --
-  -- @[-2^n, -2^(n-1) - 1]@
-  --
-  -- or too-large *signed* postive values in
-  --
-  -- @[2^(n-1), 2^n - 1]@
-  --
-  -- Note that, for positive values, being "signed" is determined by
-  -- the the intent of the caller and is not tracked anywhere.
-  then if BV.nat v < 0 || BV.nat v >= 2^(BV.width v)
-       then error "bitVector: width is too small! Calling code is buggy!"
-       else BitVector nr v
-  else error "bitVector: type-level and term-level bit widths disagree! Calling code is buggy!"
+    then -- Internally, 'BV' attempts to convert all values to non-negative,
+    -- by adding negative values to @2^n@. We first check if this
+    -- conversion to unsigned overflowed.
+    --
+    -- We don't detect too-small negative values in
+    --
+    -- @[-2^n, -2^(n-1) - 1]@
+    --
+    -- or too-large *signed* postive values in
+    --
+    -- @[2^(n-1), 2^n - 1]@
+    --
+    -- Note that, for positive values, being "signed" is determined by
+    -- the the intent of the caller and is not tracked anywhere.
+
+      if BV.nat v < 0 || BV.nat v >= 2 ^ BV.width v
+        then error "bitVector: width is too small! Calling code is buggy!"
+        else BitVector nr v
+    else error "bitVector: type-level and term-level bit widths disagree! Calling code is buggy!"
 
 -- | Deconstructor for 'BitVector'.
 unBitVector :: BitVector n -> (NatRepr n, BV)
@@ -92,9 +89,9 @@ instance TestEquality BitVector where
 instance OrdF BitVector where
   compareF (BitVector szx x) (BitVector szy y) =
     case (szx `compareF` szy, x `compare` y) of
-      (LTF,_) -> LTF
-      (GTF,_) -> GTF
-      (EQF,o) -> fromOrdering o
+      (LTF, _) -> LTF
+      (GTF, _) -> GTF
+      (EQF, o) -> fromOrdering o
 
 ------------------------------------------------------------------------
 -- Operations on 'BitVector's
@@ -113,7 +110,7 @@ width (BitVector nr _) = nr
 -- zero-extended.
 group :: NatRepr n1 -> BitVector n2 -> [BitVector n1]
 group nr (BitVector _ bv) =
-  [ bitVector nr bv' | bv' <- BV.group (natValue nr) bv ]
+  [bitVector nr bv' | bv' <- BV.group (natValue nr) bv]
 
 -- | Modify the underlying 'BV'.
 --
@@ -127,5 +124,5 @@ nat (BitVector _ bv) = BV.nat bv
 
 -- | Booleans.
 true, false :: BitVector 1
-true = bitVector knownNat (BV.bitVec 1 (1::Int))
-false = bitVector knownNat (BV.bitVec 1 (0::Int))
+true = bitVector knownNat (BV.bitVec 1 (1 :: Int))
+false = bitVector knownNat (BV.bitVec 1 (0 :: Int))

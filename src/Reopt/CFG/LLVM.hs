@@ -1,136 +1,122 @@
-{-|
-This provides functionality for converting the
-architecture-independent components of @FnReop@ functions into LLVM.
-
-It exports a fairly large set of capabilities so that all
-architecture-specific functionality can be implemented on top of this
-layer.
-
--}
-
-{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE CPP #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternGuards #-}
-{-# LANGUAGE PolyKinds #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE PatternSynonyms #-}
 
-module Reopt.CFG.LLVM
-  ( moduleForFunctions
-  , LLVMGenOptions(..)
-    -- * Internals for implement architecture specific functions
-  , LLVMArchSpecificOps(..)
-  , LLVMArchConstraints
-  , LLVMLogEvent(..)
-  , LLVMLogEventInfo(..)
-  , LLVMBitCastInfo(..)
-  , llvmLogEventHeader
-  , llvmLogEventToStrings
-  , logEvent
-  , HasValue
-  , functionTypeToLLVM
-  , Intrinsic
-  , intrinsic
-  , FunLLVMContext(archFns, funLLVMGenOptions)
-  , BBLLVM
-  , typeToLLVMType
-  , setAssignIdValue
-  , padUndef
-  , arithop
-  , selectVal
-  , convop
-  , bitcast
-  , band
-  , bor
-  , shl
-  , icmpop
-  , fcmpop
-  , cmpsxFromSize
-  , llvmAsPtr
-  , llvmTrunc
-  , llvmBitCast
-  , extractValue
-  , insertValue
-  , call
-  , call_
-  , mkLLVMValue
-  , ret
-  , effect
-  , AsmAttrs
-  , noSideEffect
-  , sideEffect
-  , callAsm
-  , callAsm_
-  , llvmITypeNat
-  ) where
+-- |
+-- This provides functionality for converting the
+-- architecture-independent components of @FnReop@ functions into LLVM.
+--
+-- It exports a fairly large set of capabilities so that all
+-- architecture-specific functionality can be implemented on top of this
+-- layer.
+module Reopt.CFG.LLVM (
+  moduleForFunctions,
+  LLVMGenOptions (..),
 
-import           Control.Lens
-import           Control.Monad
-import           Control.Monad.Except
-import           Control.Monad.Reader
-import           Control.Monad.State.Strict
-import           Data.Bifunctor (first)
-import qualified Data.ByteString.Char8 as BSC
-import           Data.Foldable
-import           Data.Int
-import           Data.List
-import           Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
-import           Data.Maybe (fromMaybe)
-import           Data.Parameterized.Classes
-import qualified Data.Parameterized.List as PL
-import           Data.Parameterized.NatRepr (widthVal)
-import           Data.Parameterized.Some
-import           Data.Parameterized.TraversableF
-import           Data.Proxy
-import qualified Data.Text as Text
-import qualified Data.Vector as V
-import           Data.Word
-import           GHC.Stack
-import           GHC.TypeLits
+  -- * Internals for implement architecture specific functions
+  LLVMArchSpecificOps (..),
+  LLVMArchConstraints,
+  LLVMLogEvent (..),
+  LLVMLogEventInfo (..),
+  LLVMBitCastInfo (..),
+  llvmLogEventHeader,
+  llvmLogEventToStrings,
+  logEvent,
+  HasValue,
+  functionTypeToLLVM,
+  Intrinsic,
+  intrinsic,
+  FunLLVMContext (archFns, funLLVMGenOptions),
+  BBLLVM,
+  typeToLLVMType,
+  setAssignIdValue,
+  padUndef,
+  arithop,
+  selectVal,
+  convop,
+  bitcast,
+  band,
+  bor,
+  shl,
+  icmpop,
+  fcmpop,
+  cmpsxFromSize,
+  llvmAsPtr,
+  llvmTrunc,
+  llvmBitCast,
+  extractValue,
+  insertValue,
+  call,
+  call_,
+  mkLLVMValue,
+  ret,
+  effect,
+  AsmAttrs,
+  noSideEffect,
+  sideEffect,
+  callAsm,
+  callAsm_,
+  llvmITypeNat,
+) where
+
+import Control.Lens
+import Control.Monad
+import Control.Monad.Except
+import Control.Monad.Reader
+import Control.Monad.State.Strict
+import Data.Bifunctor (first)
+import Data.ByteString.Char8 qualified as BSC
+import Data.Foldable
+import Data.Int
+import Data.List
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe)
+import Data.Parameterized.Classes
+import Data.Parameterized.List qualified as PL
+import Data.Parameterized.NatRepr (widthVal)
+import Data.Parameterized.Some
+import Data.Parameterized.TraversableF
+import Data.Proxy
+import Data.Text qualified as Text
+import Data.Vector qualified as V
+import Data.Word
+import GHC.Stack
+import GHC.TypeLits
+
 -- NOTE: 902 means 9.2
 #if __GLASGOW_HASKELL__ < 902
 import           Numeric.Natural (Natural)
 #endif
-import qualified Text.LLVM as L
-import qualified Text.LLVM.PP as L (ppType)
-import qualified Text.PrettyPrint.HughesPJ as HPJ
-import           Prettyprinter (pretty, viaShow)
-import           Text.Printf
+import Prettyprinter (pretty, viaShow)
+import Text.LLVM qualified as L
+import Text.LLVM.PP qualified as L (ppType)
+import Text.PrettyPrint.HughesPJ qualified as HPJ
+import Text.Printf
 
-import           Data.Macaw.Analysis.RegisterUse (BoundLoc(..))
-import           Data.Macaw.CFG
-import           Data.Macaw.Types
-import           Data.Macaw.X86 (X86_64, X86Reg(..), X86BlockPrecond(..))
+import Data.Macaw.Analysis.RegisterUse (BoundLoc (..))
+import Data.Macaw.CFG
+import Data.Macaw.Types
+import Data.Macaw.X86 (X86BlockPrecond (..), X86Reg (..), X86_64)
 
-import           Reopt.CFG.FnRep
-import           Reopt.Events (FunId, funId)
-import           Reopt.TypeInference.ConstraintGen (
-    FunctionTypeTyVars (..),
-    ModuleConstraints (..),
-  )
-import Reopt.TypeInference.Solver
-  ( FTy, TyVar, tyToLLVMType,
-    pattern FNumTy, pattern FPtrTy, pattern FConflictTy, pattern FUnknownTy,
-  )
-import qualified Reopt.VCG.Annotations as Ann
 import Data.Bits (testBit)
+import Reopt.CFG.FnRep
+import Reopt.Events (FunId, funId)
+import Reopt.TypeInference.ConstraintGen (
+  FunctionTypeTyVars (..),
+  ModuleConstraints (..),
+ )
+import Reopt.TypeInference.Solver (
+  FTy,
+  TyVar,
+  tyToLLVMType,
+  pattern FConflictTy,
+  pattern FNumTy,
+  pattern FPtrTy,
+  pattern FUnknownTy,
+ )
+import Reopt.VCG.Annotations qualified as Ann
 
-
-data LLVMBitCastInfo =
-  LLVMBitCastInfo
+data LLVMBitCastInfo = LLVMBitCastInfo
   { llvmBitCastSrcType :: L.Type
   , llvmBitCastDstType :: L.Type
   }
@@ -143,8 +129,7 @@ data LLVMLogEventInfo
   | LogInfoPtrToInt LLVMBitCastInfo
   deriving (Show)
 
-data LLVMLogEvent =
-  LLVMLogEvent
+data LLVMLogEvent = LLVMLogEvent
   { rLogEventContext :: String
   , rLogEventInfo :: LLVMLogEventInfo
   }
@@ -152,7 +137,7 @@ data LLVMLogEvent =
 
 -- | Textual info acting as a "header" for the info generated by @logEventToStrings@.
 llvmLogEventHeader :: [String]
-llvmLogEventHeader = ["Reopt Source Context", "LLVM Operation" , "Source LLVM Type", "Destination LLVM Type"]
+llvmLogEventHeader = ["Reopt Source Context", "LLVM Operation", "Source LLVM Type", "Destination LLVM Type"]
 
 -- | Render a log event as segments of textual info (amicable to, e.g., CSV rendering).
 llvmLogEventToStrings :: LLVMLogEvent -> [String]
@@ -161,18 +146,21 @@ llvmLogEventToStrings e = rLogEventContext e : llvmLogInfoToStrings (rLogEventIn
 llvmLogInfoToStrings :: LLVMLogEventInfo -> [String]
 llvmLogInfoToStrings info =
   case info of
-    LogInfoBitCast i -> "bitcast":renderCastInfo i
-    LogInfoTrunc i -> "trunc":renderCastInfo i
-    LogInfoIntToPtr i -> "inttoptr":renderCastInfo i
-    LogInfoPtrToInt i -> "ptrtoint":renderCastInfo i
-  where renderCastInfo (LLVMBitCastInfo src dst) = [ HPJ.render $ L.ppType src, HPJ.render $ L.ppType dst]
+    LogInfoBitCast i -> "bitcast" : renderCastInfo i
+    LogInfoTrunc i -> "trunc" : renderCastInfo i
+    LogInfoIntToPtr i -> "inttoptr" : renderCastInfo i
+    LogInfoPtrToInt i -> "ptrtoint" : renderCastInfo i
+ where
+  renderCastInfo (LLVMBitCastInfo src dst) = [HPJ.render $ L.ppType src, HPJ.render $ L.ppType dst]
 
 -- | Return a LLVM type for a integer with the given width.
 llvmITypeNat :: Natural -> L.Type
-llvmITypeNat w | w <= fromIntegral (maxBound :: Word32) = L.PrimType (L.Integer wn)
-               | otherwise = error $ "llvmITypeNat given bad width " ++ show w
-  where wn :: Word32
-        wn = fromIntegral w
+llvmITypeNat w
+  | w <= fromIntegral (maxBound :: Word32) = L.PrimType (L.Integer wn)
+  | otherwise = error $ "llvmITypeNat given bad width " ++ show w
+ where
+  wn :: Word32
+  wn = fromIntegral w
 
 natReprToLLVMType :: NatRepr n -> L.Type
 natReprToLLVMType = llvmITypeNat . natValue
@@ -190,15 +178,17 @@ instance HasValue (L.Typed L.Value) where
 -- Intrinsic
 
 -- | An LLVM intrinsic
-data Intrinsic = Intrinsic { intrinsicName :: !L.Symbol
-                           , intrinsicRes  :: L.Type
-                           , intrinsicArgs  :: [L.Type]
-                           , intrinsicAttrs :: [L.FunAttr]
-                           }
+data Intrinsic = Intrinsic
+  { intrinsicName :: !L.Symbol
+  , intrinsicRes :: L.Type
+  , intrinsicArgs :: [L.Type]
+  , intrinsicAttrs :: [L.FunAttr]
+  }
 
 instance HasValue Intrinsic where
   valueOf i = L.Typed tp (L.ValSymbol (intrinsicName i))
-    where tp = L.ptrT $ L.FunTy (intrinsicRes i) (intrinsicArgs i) False
+   where
+    tp = L.ptrT $ L.FunTy (intrinsicRes i) (intrinsicArgs i) False
 
 -- | Define an intrinsic that has no special attributes
 intrinsic :: String -> L.Type -> [L.Type] -> Intrinsic
@@ -206,11 +196,13 @@ intrinsic name res args = intrinsic' name res args []
 
 -- | Define an intrinsic that has no special attributes
 intrinsic' :: String -> L.Type -> [L.Type] -> [L.FunAttr] -> Intrinsic
-intrinsic' name res args attrs = Intrinsic { intrinsicName = L.Symbol name
-                                           , intrinsicRes  = res
-                                           , intrinsicArgs = args
-                                           , intrinsicAttrs = attrs
-                                           }
+intrinsic' name res args attrs =
+  Intrinsic
+    { intrinsicName = L.Symbol name
+    , intrinsicRes = res
+    , intrinsicArgs = args
+    , intrinsicAttrs = attrs
+    }
 
 --------------------------------------------------------------------------------
 -- LLVM intrinsics
@@ -219,42 +211,53 @@ intrinsic' name res args attrs = Intrinsic { intrinsicName = L.Symbol name
 -- | LLVM arithmetic with overflow intrinsic.
 overflowOp :: String -> L.Type -> Intrinsic
 overflowOp bop in_typ =
-  intrinsic ("llvm." ++ bop ++ ".with.overflow." ++ show (L.ppType in_typ))
-            (L.Struct [in_typ, L.iT 1])
-            [in_typ, in_typ]
+  intrinsic
+    ("llvm." ++ bop ++ ".with.overflow." ++ show (L.ppType in_typ))
+    (L.Struct [in_typ, L.iT 1])
+    [in_typ, in_typ]
 
 type VectorLength = Word64
 
 -- | @llvm.masked.load.*@ intrinsic
-llvmMaskedLoad :: VectorLength -- ^ Number of vector elements
-               -> String -- ^ Type name (e.g. i32)
-               -> L.Type -- ^ Element type (should match string)
-               -> Intrinsic
+llvmMaskedLoad ::
+  -- | Number of vector elements
+  VectorLength ->
+  -- | Type name (e.g. i32)
+  String ->
+  -- | Element type (should match string)
+  L.Type ->
+  Intrinsic
 llvmMaskedLoad n tp tpv = do
- let vstr = "v" ++ show n ++ tp
-     mnem = "llvm.masked.load." ++ vstr ++ ".p0" ++ vstr
-     args = [ L.PtrTo (L.Vector n tpv), L.iT 32, L.Vector n (L.iT 1), L.Vector n tpv ]
-  in intrinsic mnem (L.Vector n tpv) args
+  let vstr = "v" ++ show n ++ tp
+      mnem = "llvm.masked.load." ++ vstr ++ ".p0" ++ vstr
+      args = [L.PtrTo (L.Vector n tpv), L.iT 32, L.Vector n (L.iT 1), L.Vector n tpv]
+   in intrinsic mnem (L.Vector n tpv) args
 
 -- | @llvm.masked.store.*@ intrinsic
-llvmMaskedStore :: VectorLength -- ^ Number of vector elements
-                -> String -- ^ Type name (e.g. i32)
-                -> L.Type -- ^ Element type (should match string)
-                -> Intrinsic
+llvmMaskedStore ::
+  -- | Number of vector elements
+  VectorLength ->
+  -- | Type name (e.g. i32)
+  String ->
+  -- | Element type (should match string)
+  L.Type ->
+  Intrinsic
 llvmMaskedStore n tp tpv = do
- let vstr = "v" ++ show n ++ tp
-     mnem = "llvm.masked.store." ++ vstr ++ ".p0" ++ vstr
-     args = [ L.PtrTo (L.Vector n tpv), L.iT 32, L.Vector n (L.iT 1), L.Vector n tpv ]
-  in intrinsic mnem (L.Vector n tpv) args
+  let vstr = "v" ++ show n ++ tp
+      mnem = "llvm.masked.store." ++ vstr ++ ".p0" ++ vstr
+      args = [L.PtrTo (L.Vector n tpv), L.iT 32, L.Vector n (L.iT 1), L.Vector n tpv]
+   in intrinsic mnem (L.Vector n tpv) args
 
 llvmIntrinsics :: [Intrinsic]
-llvmIntrinsics = [ overflowOp bop in_typ
-                   | bop <- [ "uadd", "sadd", "usub", "ssub" ]
-                   , in_typ <- map L.iT [4, 8, 16, 32, 64] ]
-                 ++
-                 [ intrinsic ("llvm." ++ uop ++ "." ++ show (L.ppType typ)) typ [typ, L.iT 1]
-                 | uop  <- ["cttz", "ctlz"]
-                 , typ <- map L.iT [8, 16, 32, 64] ]
+llvmIntrinsics =
+  [ overflowOp bop in_typ
+  | bop <- ["uadd", "sadd", "usub", "ssub"]
+  , in_typ <- map L.iT [4, 8, 16, 32, 64]
+  ]
+    ++ [ intrinsic ("llvm." ++ uop ++ "." ++ show (L.ppType typ)) typ [typ, L.iT 1]
+       | uop <- ["cttz", "ctlz"]
+       , typ <- map L.iT [8, 16, 32, 64]
+       ]
 
 --------------------------------------------------------------------------------
 -- conversion to LLVM
@@ -274,15 +277,14 @@ llvmFloatType flt =
     X86_80FloatRepr -> L.X86_fp80
 
 typeToLLVMType :: TypeRepr tp -> L.Type
-typeToLLVMType BoolTypeRepr   = L.iT 1
+typeToLLVMType BoolTypeRepr = L.iT 1
 typeToLLVMType (BVTypeRepr n) = llvmITypeNat (natValue n)
 typeToLLVMType (FloatTypeRepr flt) = L.PrimType $ L.FloatType $ llvmFloatType flt
 typeToLLVMType (TupleTypeRepr s) = L.Struct (toListFC typeToLLVMType s)
 typeToLLVMType (VecTypeRepr w tp)
-   | toInteger (natValue w) <= toInteger (maxBound :: Int32) =
-     L.Vector (fromIntegral (natValue w)) (typeToLLVMType tp)
-   | otherwise = error $ "Vector width of " ++ show w ++ " is too large."
-
+  | toInteger (natValue w) <= toInteger (maxBound :: Int32) =
+      L.Vector (fromIntegral (natValue w)) (typeToLLVMType tp)
+  | otherwise = error $ "Vector width of " ++ show w ++ " is too large."
 
 -- | This is a special label used for switch statement defaults.
 --
@@ -294,9 +296,11 @@ switchFailLabel = "failure"
 
 -- | Block for fail label.
 failBlock :: L.BasicBlock
-failBlock = L.BasicBlock { L.bbLabel = Just $ L.Named $ L.Ident switchFailLabel
-                         , L.bbStmts = [L.Effect L.Unreachable []]
-                         }
+failBlock =
+  L.BasicBlock
+    { L.bbLabel = Just $ L.Named $ L.Ident switchFailLabel
+    , L.bbStmts = [L.Effect L.Unreachable []]
+    }
 
 ------------------------------------------------------------------------
 -- Return handing
@@ -311,52 +315,61 @@ llvmFunctionReturnType ftp =
 ------------------------------------------------------------------------
 
 functionTypeToLLVM :: FunctionType arch -> L.Type
-functionTypeToLLVM ft = L.ptrT $
-  L.FunTy (llvmFunctionReturnType ft)
-          (viewSome typeToLLVMType <$> fnArgTypes ft)
-          (fnVarArgs ft)
+functionTypeToLLVM ft =
+  L.ptrT $
+    L.FunTy
+      (llvmFunctionReturnType ft)
+      (viewSome typeToLLVMType <$> fnArgTypes ft)
+      (fnVarArgs ft)
 
 -- FIXME
-functionTypeToLLVM' :: forall arch. LLVMArchConstraints arch =>
-                       FunctionType arch ->
-                       [ Maybe FTy ] -> Maybe (Maybe FTy) -> L.Type
-functionTypeToLLVM' ft args m_ret = L.ptrT $
-  L.FunTy (fromMaybe (L.PrimType L.Void) m_ret')
-          (zipWith mkTy (viewSome typeToLLVMType <$> fnArgTypes ft) args)
-          (fnVarArgs ft)
-  where
-    m_ret'    = mkTy <$> (viewSome typeToLLVMType <$> fnReturnType ft) <*> m_ret
+functionTypeToLLVM' ::
+  forall arch.
+  LLVMArchConstraints arch =>
+  FunctionType arch ->
+  [Maybe FTy] ->
+  Maybe (Maybe FTy) ->
+  L.Type
+functionTypeToLLVM' ft args m_ret =
+  L.ptrT $
+    L.FunTy
+      (fromMaybe (L.PrimType L.Void) m_ret')
+      (zipWith mkTy (viewSome typeToLLVMType <$> fnArgTypes ft) args)
+      (fnVarArgs ft)
+ where
+  m_ret' = mkTy <$> (viewSome typeToLLVMType <$> fnReturnType ft) <*> m_ret
 
-    mkTy lty = maybe lty (tyToLLVMType ptrWidth)
-    ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
+  mkTy lty = maybe lty (tyToLLVMType ptrWidth)
+  ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
 
-
-declareFunction :: FunctionDecl arch
-                -> L.Declare
+declareFunction ::
+  FunctionDecl arch ->
+  L.Declare
 declareFunction d =
   let ftp = funDeclType d
-   in L.Declare { L.decLinkage = Nothing
-                , L.decVisibility = Nothing
-                , L.decRetType = llvmFunctionReturnType ftp
-                , L.decName    = L.Symbol (BSC.unpack (funDeclName d))
-                , L.decArgs    = viewSome typeToLLVMType <$> fnArgTypes ftp
-                , L.decVarArgs = fnVarArgs ftp
-                , L.decAttrs   = []
-                , L.decComdat  = Nothing
-                }
+   in L.Declare
+        { L.decLinkage = Nothing
+        , L.decVisibility = Nothing
+        , L.decRetType = llvmFunctionReturnType ftp
+        , L.decName = L.Symbol (BSC.unpack (funDeclName d))
+        , L.decArgs = viewSome typeToLLVMType <$> fnArgTypes ftp
+        , L.decVarArgs = fnVarArgs ftp
+        , L.decAttrs = []
+        , L.decComdat = Nothing
+        }
 
 -- Pads the given list of values to be the target lenght using undefs
 padUndef :: L.Type -> Int -> [L.Typed L.Value] -> [L.Typed L.Value]
 padUndef typ len xs = xs ++ replicate (len - length xs) (L.Typed typ L.ValUndef)
 
 -- | Result obtained by printing a block to LLVM
-data LLVMBlockResult arch =
-  LLVMBlockResult { fnBlock :: !(FnBlock arch)
-                    -- ^ Fn block to create this.
-                  , llvmPhiVars :: !(V.Vector (PhiBinding arch))
-                    -- ^ Vector phi variables
-                  , finalBBState :: !(BBLLVMState arch)
-                  }
+data LLVMBlockResult arch = LLVMBlockResult
+  { fnBlock :: !(FnBlock arch)
+  -- ^ Fn block to create this.
+  , llvmPhiVars :: !(V.Vector (PhiBinding arch))
+  -- ^ Vector phi variables
+  , finalBBState :: !(BBLLVMState arch)
+  }
 
 -- | Maps each block label to the number of times a value should be repeated and the value.
 --
@@ -376,32 +389,31 @@ type ResolvePhiMap w = Map (FnBlockLabel w) BlockPhiAssignment
 -- This does not propagate values.
 initResolvePhiMap :: Function arch -> ResolvePhiMap (ArchAddrWidth arch)
 initResolvePhiMap f =
-  Map.fromList [ (fbLabel b, V.replicate phiCnt Map.empty)
-               | b <- fnBlocks f
-               , let phiCnt = V.length (fbPhiVars b)
-               ]
+  Map.fromList
+    [ (fbLabel b, V.replicate phiCnt Map.empty)
+    | b <- fnBlocks f
+    , let phiCnt = V.length (fbPhiVars b)
+    ]
 
 -- | Return the phi assignment associated with the given target label.
 --
 -- Note. This needs the expected number of phi variables in case
 -- the phi variables have not yet been initialized.
-phiAssignmentForBlock :: ResolvePhiMap w
-                      -> FnBlockLabel w
-                      -> BlockPhiAssignment
+phiAssignmentForBlock ::
+  ResolvePhiMap w ->
+  FnBlockLabel w ->
+  BlockPhiAssignment
 phiAssignmentForBlock m l =
-    Map.findWithDefault (error emsg) l m
-  where emsg = "Could not find phi assignment."
-
+  Map.findWithDefault (error emsg) l m
+ where
+  emsg = "Could not find phi assignment."
 
 -- | This is used for resolving type mismatch due to subtyping when
 -- doing a block transfer.
 type PhiMap arch = Map (FnBlockLabel (ArchAddrWidth arch)) (V.Vector (Some (FnPhiVar arch)))
 
 phiMapFromFunction :: Function arch -> PhiMap arch
-phiMapFromFunction f = Map.fromList [ (fbLabel b, fbPhiVars b) | b <- fnBlocks f ]
-
-
-
+phiMapFromFunction f = Map.fromList [(fbLabel b, fbPhiVars b) | b <- fnBlocks f]
 
 ------------------------------------------------------------------------
 -- IntrinsicMap
@@ -419,23 +431,23 @@ type IntrinsicMap = Map L.Symbol Intrinsic
 type AssignValMap = Map FnAssignId (L.Typed L.Value)
 
 -- | State relative to a function.
-data FunState arch =
-  FunState { nmCounter :: !Int
-             -- ^ Counter for generating new identifiers
-           , funIntrinsicMap :: !IntrinsicMap
-             -- ^ Collection used for tracking which intrinsics we need.
-           , needSwitchFailLabel :: !Bool
-             -- ^ Flag that indicates if we need the fail block for a
-             -- switch statement.
-           , funBlockPhiMap :: !(ResolvePhiMap (ArchAddrWidth arch))
-             -- ^ Maps blocks to the phi nodes for that block.
-           }
+data FunState arch = FunState
+  { nmCounter :: !Int
+  -- ^ Counter for generating new identifiers
+  , funIntrinsicMap :: !IntrinsicMap
+  -- ^ Collection used for tracking which intrinsics we need.
+  , needSwitchFailLabel :: !Bool
+  -- ^ Flag that indicates if we need the fail block for a
+  -- switch statement.
+  , funBlockPhiMap :: !(ResolvePhiMap (ArchAddrWidth arch))
+  -- ^ Maps blocks to the phi nodes for that block.
+  }
 
 funIntrinsicMapLens :: Simple Lens (FunState arch) IntrinsicMap
-funIntrinsicMapLens = lens funIntrinsicMap (\s v -> s { funIntrinsicMap = v })
+funIntrinsicMapLens = lens funIntrinsicMap (\s v -> s{funIntrinsicMap = v})
 
 funBlockPhiMapLens :: Lens' (FunState arch) (ResolvePhiMap (ArchAddrWidth arch))
-funBlockPhiMapLens = lens funBlockPhiMap (\s v -> s { funBlockPhiMap = v })
+funBlockPhiMapLens = lens funBlockPhiMap (\s v -> s{funBlockPhiMap = v})
 
 ------------------------------------------------------------------------
 -- Functions for creating LLVM identifiers.
@@ -447,12 +459,12 @@ tempIdent c = L.Ident ('t' : show c)
 -- LLVMGEneration options
 
 -- | Options for generating LLVM
-newtype LLVMGenOptions =
-  LLVMGenOptions { mcExceptionIsUB :: Bool
-                   -- ^ Code with side effects is allowed to result in
-                   -- LLVM undefined behavior if machine code would
-                   -- have raised an exception.
-                 }
+newtype LLVMGenOptions = LLVMGenOptions
+  { mcExceptionIsUB :: Bool
+  -- ^ Code with side effects is allowed to result in
+  -- LLVM undefined behavior if machine code would
+  -- have raised an exception.
+  }
 
 ------------------------------------------------------------------------
 -- BBLLVM
@@ -460,89 +472,97 @@ newtype LLVMGenOptions =
 -- | Architecture-specific operations for generating LLVM
 data LLVMArchSpecificOps arch = LLVMArchSpecificOps
   { archEndianness :: !Endianness
-    -- ^ Endianness of architecture
-    --
-    -- Some architectures allow endianness to change dynamically,
-    -- Macaw does not support this.
-  , archFnCallback :: !(forall tp . ArchFn arch (FnValue arch) tp
-                        -> BBLLVM arch (L.Typed L.Value))
-    -- ^ Callback for architecture-specific functions
+  -- ^ Endianness of architecture
+  --
+  -- Some architectures allow endianness to change dynamically,
+  -- Macaw does not support this.
+  , archFnCallback ::
+      !( forall tp.
+         ArchFn arch (FnValue arch) tp ->
+         BBLLVM arch (L.Typed L.Value)
+       )
+  -- ^ Callback for architecture-specific functions
   , archStmtCallback :: !(FnArchStmt arch (FnValue arch) -> BBLLVM arch ())
-    -- ^ Callback for architecture-specific statements
-  , popCountCallback :: !(forall w . NatRepr w -> FnValue arch (BVType w)
-                          -> BBLLVM arch (L.Typed L.Value))
-    -- ^ Callback for emitting a popcount instruction
-    --
-    -- This is architecture-specific so that we can choose machine code.
+  -- ^ Callback for architecture-specific statements
+  , popCountCallback ::
+      !( forall w.
+         NatRepr w ->
+         FnValue arch (BVType w) ->
+         BBLLVM arch (L.Typed L.Value)
+       )
+  -- ^ Callback for emitting a popcount instruction
+  --
+  -- This is architecture-specific so that we can choose machine code.
   }
 
-type LLVMArchConstraints arch
-   = ( FnArchConstraints arch
-     , ShowF (ArchReg arch)
-     , OrdF (ArchReg arch)
-     , IsArchStmt (FnArchStmt arch)
-     , Eq (FunctionType arch)
-     )
+type LLVMArchConstraints arch =
+  ( FnArchConstraints arch
+  , ShowF (ArchReg arch)
+  , OrdF (ArchReg arch)
+  , IsArchStmt (FnArchStmt arch)
+  , Eq (FunctionType arch)
+  )
 
 -- | Information used to generate LLVM for a specific function.
 --
 -- This information is the same for all blocks within the function.
 data FunLLVMContext arch = FunLLVMContext
-  { archFns  :: !(LLVMArchSpecificOps arch)
-    -- ^ Architecture-specific functions
+  { archFns :: !(LLVMArchSpecificOps arch)
+  -- ^ Architecture-specific functions
   , funLLVMGenOptions :: !LLVMGenOptions
-    -- ^ Options for generating LLVM
+  -- ^ Options for generating LLVM
   , funAddr :: ArchSegmentOff arch
   , funName :: BSC.ByteString
   , funArgs :: !(V.Vector (L.Typed L.Value))
-    -- ^ Arguments to this function.
+  -- ^ Arguments to this function.
   , funRetType :: !(Maybe (Maybe FTy))
-    -- ^ Return for this function
+  -- ^ Return for this function
   , funAllocaCount :: !Int
   , moduleConstraints :: ModuleConstraints arch
   , funBlockPhis :: !(PhiMap arch)
-    -- ^ Typing constraints inferred for the module
-  , withArchConstraints :: forall a . (LLVMArchConstraints arch => a) -> a
+  -- ^ Typing constraints inferred for the module
+  , withArchConstraints :: forall a. (LLVMArchConstraints arch => a) -> a
   }
 
 -- | State specific to translating a single basic block.
 data BBLLVMState arch = BBLLVMState
   { bbThisLabel :: !L.BlockLabel
-    -- ^ The label for the block we are translating
+  -- ^ The label for the block we are translating
   , bbAssignValMap :: !AssignValMap
-    -- ^ Map assignment ids created in this block to the LLVM value.
+  -- ^ Map assignment ids created in this block to the LLVM value.
   , bbStmts :: ![L.Stmt]
-    -- ^ Statements added so far with last statement at head of list.
+  -- ^ Statements added so far with last statement at head of list.
   , bbLLVMLogEvents :: ![LLVMLogEvent]
   }
 
-
-data BBLLVMPair arch = BBLLVMPair { funState :: !(FunState arch)
-                                  , bbLLVMState :: !(BBLLVMState arch)
-                                  }
+data BBLLVMPair arch = BBLLVMPair
+  { funState :: !(FunState arch)
+  , bbLLVMState :: !(BBLLVMState arch)
+  }
 
 funStateLens :: Simple Lens (BBLLVMPair arch) (FunState arch)
-funStateLens = lens funState (\s v -> s { funState = v })
+funStateLens = lens funState (\s v -> s{funState = v})
 
-newtype BBLLVM arch a = BBLLVM { unBBLLVM :: ReaderT (FunLLVMContext arch) (State (BBLLVMPair arch)) a }
-  deriving ( Functor
-           , Applicative
-           , Monad
-           , MonadReader (FunLLVMContext arch)
-           )
+newtype BBLLVM arch a = BBLLVM {unBBLLVM :: ReaderT (FunLLVMContext arch) (State (BBLLVMPair arch)) a}
+  deriving
+    ( Functor
+    , Applicative
+    , Monad
+    , MonadReader (FunLLVMContext arch)
+    )
 
 instance MonadState (BBLLVMState arch) (BBLLVM arch) where
   get = BBLLVM $ bbLLVMState <$> get
-  put s = BBLLVM $ modify $ \t -> t { bbLLVMState = s }
+  put s = BBLLVM $ modify $ \t -> t{bbLLVMState = s}
 
 logEvent :: LLVMLogEvent -> BBLLVM arch ()
-logEvent e = modify' $ \bs ->bs {bbLLVMLogEvents = e:bbLLVMLogEvents bs}
+logEvent e = modify' $ \bs -> bs{bbLLVMLogEvents = e : bbLLVMLogEvents bs}
 
 -- | Generate a fresh identifier with the name 'rX'
 freshName :: BBLLVM arch L.Ident
 freshName = BBLLVM $ do
   c <- uses funStateLens nmCounter
-  modify' $ funStateLens %~ \fs -> fs { nmCounter = c + 1 }
+  modify' $ funStateLens %~ \fs -> fs{nmCounter = c + 1}
   pure $! tempIdent c
 
 addIntrinsic :: Intrinsic -> BBLLVM arch ()
@@ -553,13 +573,13 @@ addIntrinsic i = BBLLVM $ do
 
 markNeedSwitchFailLabel :: BBLLVM arch ()
 markNeedSwitchFailLabel = BBLLVM $ do
-  funStateLens %= \s -> s { needSwitchFailLabel = True }
+  funStateLens %= \s -> s{needSwitchFailLabel = True}
 
 -- | Append a statement to the list of statements
 emitStmt :: L.Stmt -> BBLLVM arch ()
 emitStmt stmt = seq stmt $ do
   s <- get
-  put $! s { bbStmts = stmt : bbStmts s }
+  put $! s{bbStmts = stmt : bbStmts s}
 
 -- | Evaluate an instruction and return the result.
 evalInstr :: L.Instr -> BBLLVM arch L.Value
@@ -591,7 +611,8 @@ selectVal ::
   BBLLVM arch (L.Typed L.Value)
 selectVal resTy ifThens elseVal = do
   L.Typed resTy <$> foldM addClause (L.typedValue elseVal) ifThens
-  where addClause acc (test,res) = evalInstr $ L.Select test res acc
+ where
+  addClause acc (test, res) = evalInstr $ L.Select test res acc
 
 unimplementedInstr' :: L.Type -> String -> BBLLVM arch (L.Typed L.Value)
 unimplementedInstr' typ reason = do
@@ -599,27 +620,31 @@ unimplementedInstr' typ reason = do
   return (L.Typed typ L.ValUndef)
 
 -- | Sets the value of the function assign id.
-setAssignIdValue :: HasCallStack
-                 => FnAssignId
-                 -> L.Typed L.Value
-                 -> BBLLVM arch ()
+setAssignIdValue ::
+  HasCallStack =>
+  FnAssignId ->
+  L.Typed L.Value ->
+  BBLLVM arch ()
 setAssignIdValue fid v = do
   m <- gets bbAssignValMap
   case Map.lookup fid m of
     Just{} -> error $ "internal: Assign id " ++ show (pretty fid) ++ " already assigned."
     Nothing -> pure ()
-  modify' $ \s -> s { bbAssignValMap = Map.insert fid v (bbAssignValMap s) }
+  modify' $ \s -> s{bbAssignValMap = Map.insert fid v (bbAssignValMap s)}
 
 ------------------------------------------------------------------------
 -- Convert a value to LLVM
 
 -- | Map a function value to a LLVM value with no change.
-valueToLLVM :: forall arch tp
-            .  HasCallStack
-            => FunLLVMContext arch -- ^ Context
-            -> AssignValMap -- ^ Map from assignment ids to value.
-            -> FnValue arch tp
-            -> BBLLVM arch (L.Typed L.Value)
+valueToLLVM ::
+  forall arch tp.
+  HasCallStack =>
+  -- | Context
+  FunLLVMContext arch ->
+  -- | Map from assignment ids to value.
+  AssignValMap ->
+  FnValue arch tp ->
+  BBLLVM arch (L.Typed L.Value)
 valueToLLVM ctx avmap val = withArchConstraints ctx $ do
   let ptrWidth = addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
   case val of
@@ -654,20 +679,23 @@ valueToLLVM ctx avmap val = withArchConstraints ctx $ do
       let typ = natReprToLLVMType ptrWidth
       let fptr :: L.Typed L.Value
           fptr = L.Typed (functionTypeToLLVM ftp) (L.ValSymbol (L.Symbol (BSC.unpack nm)))
-      logEvent $ LLVMLogEvent "FnFunctionEntryValue"
-          $ LogInfoPtrToInt
-          $ LLVMBitCastInfo (L.typedType fptr) typ
+      logEvent $
+        LLVMLogEvent "FnFunctionEntryValue" $
+          LogInfoPtrToInt $
+            LLVMBitCastInfo (L.typedType fptr) typ
       pure $ L.Typed typ $ L.ValConstExpr (L.ConstConv L.PtrToInt fptr typ)
     -- Value is an argument passed via a register.
-    FnArg i _tp | 0 <= i, i < V.length (funArgs ctx) -> pure $ funArgs ctx V.! i
-                | otherwise -> error $ "Illegal argument index " ++ show i
+    FnArg i _tp
+      | 0 <= i, i < V.length (funArgs ctx) -> pure $ funArgs ctx V.! i
+      | otherwise -> error $ "Illegal argument index " ++ show i
 
-mkLLVMValue :: HasCallStack
-            => FnValue arch tp
-            -> BBLLVM arch (L.Typed L.Value)
+mkLLVMValue ::
+  HasCallStack =>
+  FnValue arch tp ->
+  BBLLVM arch (L.Typed L.Value)
 mkLLVMValue val = do
   ctx <- ask
-  m   <- gets bbAssignValMap
+  m <- gets bbAssignValMap
   valueToLLVM ctx m val
 
 arithop :: L.ArithOp -> L.Typed L.Value -> L.Value -> BBLLVM arch (L.Typed L.Value)
@@ -690,7 +718,6 @@ fcmpop :: L.FCmpOp -> L.Typed L.Value -> L.Value -> BBLLVM arch (L.Typed L.Value
 fcmpop f val s = do
   L.Typed (L.iT 1) <$> evalInstr (L.FCmp f val s)
 
-
 -- | Given a byte size, return the appropriate mnemonic, i.e.,
 -- one of `cmpsb` (1), `cmpsw` (2), `cmpsd` (4), or `cmpsq` (8).
 cmpsxFromSize :: Integer -> Maybe String
@@ -700,21 +727,24 @@ cmpsxFromSize 4 = Just "cmpsd"
 cmpsxFromSize 8 = Just "cmpsq"
 cmpsxFromSize _ = Nothing
 
-
 -- | Extract a value from a struct
 extractValue :: L.Typed L.Value -> Int32 -> BBLLVM arch (L.Typed L.Value)
 extractValue ta i = do
   let etp = case L.typedType ta of
-              L.Struct fl -> fl !! fromIntegral i
-              L.Array _l etp' -> etp'
-              _ -> error "extractValue not given a struct or array."
+        L.Struct fl -> fl !! fromIntegral i
+        L.Array _l etp' -> etp'
+        _ -> error "extractValue not given a struct or array."
   L.Typed etp <$> evalInstr (L.ExtractValue ta [i])
 
 -- | Insert a valiue into an aggregate
-insertValue :: L.Typed L.Value -- ^ Aggregate
-            -> L.Typed L.Value -- ^ Value to insert
-            -> Int32 -- ^ Index to insert
-            -> BBLLVM arch (L.Typed L.Value)
+insertValue ::
+  -- | Aggregate
+  L.Typed L.Value ->
+  -- | Value to insert
+  L.Typed L.Value ->
+  -- | Index to insert
+  Int32 ->
+  BBLLVM arch (L.Typed L.Value)
 insertValue ta tv i =
   L.Typed (L.typedType ta) <$> evalInstr (L.InsertValue ta tv [i])
 
@@ -746,10 +776,11 @@ lshr :: L.Typed L.Value -> L.Value -> BBLLVM arch (L.Typed L.Value)
 lshr = bitop (L.Lshr False)
 
 -- | Generate a non-tail call that returns a value
-call :: (HasCallStack, HasValue v)
-     => v
-     -> [L.Typed L.Value]
-     -> BBLLVM arch (L.Typed L.Value)
+call ::
+  (HasCallStack, HasValue v) =>
+  v ->
+  [L.Typed L.Value] ->
+  BBLLVM arch (L.Typed L.Value)
 call (valueOf -> f) args =
   case L.typedType f of
     L.PtrTo (L.FunTy res _argTypes _varArgs) -> do
@@ -769,89 +800,91 @@ call_ (valueOf -> f) args =
     _ -> error $ "call_ given non-function pointer argument\n" ++ show f
 
 -- | Sign extend a boolean value to the given width.
-carryValue :: (HasCallStack, 1 <= w)
-           => NatRepr w
-           -> FnValue arch BoolType
-           -> BBLLVM arch (L.Typed L.Value)
+carryValue ::
+  (HasCallStack, 1 <= w) =>
+  NatRepr w ->
+  FnValue arch BoolType ->
+  BBLLVM arch (L.Typed L.Value)
 carryValue w x = do
   val <- mkLLVMValue x
-  if natValue w == 1 then
-    pure val
-   else
-    zext val (llvmITypeNat (natValue w))
+  if natValue w == 1
+    then pure val
+    else zext val (llvmITypeNat (natValue w))
 
 -- | Handle an intrinsic overflows
-intrinsicOverflows :: (HasCallStack, 1 <= w)
-                   => String
-                   -> FnValue arch (BVType w)
-                   -> FnValue arch (BVType w)
-                   -> FnValue arch BoolType
-                   -> BBLLVM arch (L.Typed L.Value)
+intrinsicOverflows ::
+  (HasCallStack, 1 <= w) =>
+  String ->
+  FnValue arch (BVType w) ->
+  FnValue arch (BVType w) ->
+  FnValue arch BoolType ->
+  BBLLVM arch (L.Typed L.Value)
 -- Special case where carry/borrow flag is 0.
 intrinsicOverflows bop x y (FnConstantBool False) = do
   x' <- mkLLVMValue x
   y' <- mkLLVMValue y
   let in_typ = L.typedType x'
-  r_tuple    <- call (overflowOp bop in_typ) [x', y']
+  r_tuple <- call (overflowOp bop in_typ) [x', y']
   extractValue r_tuple 1
 -- General case involves two calls
 intrinsicOverflows bop x y c = bbArchConstraints $ do
   x' <- mkLLVMValue x
   y' <- mkLLVMValue y
   let in_typ = L.typedType x'
-  r_tuple    <- call (overflowOp bop in_typ) [x', y']
-  r          <- extractValue r_tuple 0
-  overflows  <- extractValue r_tuple 1
+  r_tuple <- call (overflowOp bop in_typ) [x', y']
+  r <- extractValue r_tuple 0
+  overflows <- extractValue r_tuple 1
   -- Check for overflow in carry flag
   c' <- carryValue (typeWidth x) c
-  r_tuple'   <- call (overflowOp bop in_typ) [r, c']
+  r_tuple' <- call (overflowOp bop in_typ) [r, c']
   overflows' <- extractValue r_tuple' 1
   bor overflows (L.typedValue overflows')
 
-
-appToLLVM :: forall arch tp
-          .  HasCallStack
-          => FnAssignId -- ^ Value being assigned
-          -> App (FnValue arch) tp
-          -> BBLLVM arch (L.Typed L.Value)
+appToLLVM ::
+  forall arch tp.
+  HasCallStack =>
+  -- | Value being assigned
+  FnAssignId ->
+  App (FnValue arch) tp ->
+  BBLLVM arch (L.Typed L.Value)
 appToLLVM lhs app = bbArchConstraints $ do
   let typ = typeToLLVMType $ typeRepr app
-  let binop :: (L.Typed L.Value -> L.Value -> BBLLVM arch (L.Typed L.Value))
-            -> FnValue arch utp
-            -> FnValue arch utp
-            -> BBLLVM arch (L.Typed L.Value)
+  let binop ::
+        (L.Typed L.Value -> L.Value -> BBLLVM arch (L.Typed L.Value)) ->
+        FnValue arch utp ->
+        FnValue arch utp ->
+        BBLLVM arch (L.Typed L.Value)
       binop f x y = do
         x' <- mkLLVMValue x
         y' <- mkLLVMValue y
         f x' (L.typedValue y')
   case app of
-    Eq x y ->  binop (icmpop L.Ieq) x y
+    Eq x y -> binop (icmpop L.Ieq) x y
     Mux _tp c t f -> do
       l_c <- mkLLVMValue c
       l_t <- mkLLVMValue t
       l_f <- mkLLVMValue f
       fmap (L.Typed (L.typedType l_t)) $ evalInstr $ L.Select l_c l_t (L.typedValue l_f)
-
     AndApp x y -> binop band x y
-    OrApp  x y -> binop bor x y
+    OrApp x y -> binop bor x y
     NotApp x -> do
       -- x = 0 == complement x, according to LLVM manual.
       llvmX <- mkLLVMValue x
       icmpop L.Ieq llvmX (L.ValInteger 0)
-    XorApp x y    -> binop bxor x y
-
+    XorApp x y -> binop bxor x y
     -- Construct a tuple from fields.
     MkTuple fieldTypes fields -> do
       let structType = L.Struct (toListFC typeToLLVMType fieldTypes)
       let initUndef = L.Typed structType L.ValUndef
-      let f :: forall utp
-            .  FnValue arch utp
-            -> (Int32 -> L.Typed L.Value -> BBLLVM arch (L.Typed L.Value))
-            -> (Int32 -> L.Typed L.Value -> BBLLVM arch (L.Typed L.Value))
+      let f ::
+            forall utp.
+            FnValue arch utp ->
+            (Int32 -> L.Typed L.Value -> BBLLVM arch (L.Typed L.Value)) ->
+            (Int32 -> L.Typed L.Value -> BBLLVM arch (L.Typed L.Value))
           f fld c i s = do
             llvmFieldValue <- mkLLVMValue fld
             s' <- insertValue s llvmFieldValue i
-            c (i+1) s'
+            c (i + 1) s'
       foldrFC f (\_ r -> pure r) fields 0 initUndef
     -- :: !(P.List TypeRepr l) -> !(f (TupleType l)) -> !(P.Index l r) -> App f r
     TupleField _fieldTypes macawStruct idx -> do
@@ -861,10 +894,10 @@ appToLLVM lhs app = bbArchConstraints $ do
       let idxVal :: Integer
           idxVal = PL.indexValue idx
       when (idxVal >= toInteger (maxBound :: Int32)) $
-        error $ "Index out of range " ++ show idxVal ++ "."
+        error $
+          "Index out of range " ++ show idxVal ++ "."
       -- Extract a value
       extractValue llvmStruct (fromInteger idxVal :: Int32)
-
     ExtractElement fldType vec idx -> do
       let llvmFldType = typeToLLVMType fldType
       llvmVec <- mkLLVMValue vec
@@ -876,10 +909,9 @@ appToLLVM lhs app = bbArchConstraints $ do
       llvmVal <- mkLLVMValue val
       let llvmIdx = L.ValInteger (toInteger idx)
       L.Typed llvmVecType <$> evalInstr (L.InsertElt llvmVec llvmVal llvmIdx)
-
     Trunc v sz -> mkLLVMValue v >>= \u -> llvmTrunc "appToLLVM" u (natReprToLLVMType sz)
-    SExt  v sz -> mkLLVMValue v >>= \u -> convop L.SExt  u (natReprToLLVMType sz)
-    UExt  v sz -> mkLLVMValue v >>= \u -> convop L.ZExt  u (natReprToLLVMType sz)
+    SExt v sz -> mkLLVMValue v >>= \u -> convop L.SExt u (natReprToLLVMType sz)
+    UExt v sz -> mkLLVMValue v >>= \u -> convop L.ZExt u (natReprToLLVMType sz)
     Bitcast x tp -> do
       llvmVal <- mkLLVMValue x
       llvmBitCast "appToLLVM" llvmVal (typeToLLVMType (widthEqTarget tp))
@@ -892,20 +924,16 @@ appToLLVM lhs app = bbArchConstraints $ do
       case (typeOfResult, tx, ty) of
         (_, Just (FPtrTy _), Just (FPtrTy _)) ->
           error "Inferred a pointer type for both addends, this suggests a bug in the constraint generation/solving!"
-
-        (Just (FPtrTy lhsty), Just FPtrTy {}, Just FNumTy {})
-          | FnAssignedValue FnAssignment { fnAssignRhs = FnAddrWidthConstant o } <- y ->
-            bvAddPtrOffset (tyToLLVMType ptrWidth lhsty) x o
+        (Just (FPtrTy lhsty), Just FPtrTy{}, Just FNumTy{})
+          | FnAssignedValue FnAssignment{fnAssignRhs = FnAddrWidthConstant o} <- y ->
+              bvAddPtrOffset (tyToLLVMType ptrWidth lhsty) x o
           | otherwise -> bvAddPtrSymbolic (tyToLLVMType ptrWidth lhsty) x y
-
-        (Just (FPtrTy lhsty), Just FNumTy {}, Just FPtrTy {})
-          | FnAssignedValue FnAssignment { fnAssignRhs = FnAddrWidthConstant o } <- x ->
-            bvAddPtrOffset (tyToLLVMType ptrWidth lhsty) y o
+        (Just (FPtrTy lhsty), Just FNumTy{}, Just FPtrTy{})
+          | FnAssignedValue FnAssignment{fnAssignRhs = FnAddrWidthConstant o} <- x ->
+              bvAddPtrOffset (tyToLLVMType ptrWidth lhsty) y o
           | otherwise -> bvAddPtrSymbolic (tyToLLVMType ptrWidth lhsty) y x
-
-        (_, Just FPtrTy {}, _) -> error "BUG: Expecting a ptr return ty"
-        (_, _, Just FPtrTy {}) -> error "BUG: Expecting a ptr return ty"
-
+        (_, Just FPtrTy{}, _) -> error "BUG: Expecting a ptr return ty"
+        (_, _, Just FPtrTy{}) -> error "BUG: Expecting a ptr return ty"
         -- If the result ought to be a pointer, but we have no idea which of the
         -- two arguments is the pointer, we must perform a bitvector add, but
         -- then cast the result into the appropriate pointer type that will be
@@ -913,18 +941,17 @@ appToLLVM lhs app = bbArchConstraints $ do
         (Just (FPtrTy pointee), _, _) -> do
           result <- binop (arithop (L.Add False False)) x y
           let pty = L.PtrTo (tyToLLVMType ptrWidth pointee)
-          logEvent $ LLVMLogEvent "BVAdd(ptr_result)"
-                   $ LogInfoIntToPtr
-                   $ LLVMBitCastInfo (L.typedType result) pty
+          logEvent $
+            LLVMLogEvent "BVAdd(ptr_result)" $
+              LogInfoIntToPtr $
+                LLVMBitCastInfo (L.typedType result) pty
           convop L.IntToPtr result pty
-
         _ -> binop (arithop (L.Add False False)) x y
     BVAdc _sz x y (FnConstantBool False) -> do
       binop (arithop (L.Add False False)) x y
     BVAdc _sz x y c -> do
       r <- binop (arithop (L.Add False False)) x y
       arithop (L.Add False False) r . L.typedValue =<< carryValue (typeWidth x) c
-
     BVSub _sz x y -> do
       typeOfResult <- getInferredTypeForAssignIdBBLLVM lhs
       tx <- getInferredType x
@@ -933,24 +960,21 @@ appToLLVM lhs app = bbArchConstraints $ do
 
       case (typeOfResult, tx, ty) of
         (_, Just (FPtrTy _), Just (FPtrTy _)) -> bvSubPtrPtr x y
-
-        (Just (FPtrTy lhsty), Just FPtrTy {}, Just FNumTy {}) ->
+        (Just (FPtrTy lhsty), Just FPtrTy{}, Just FNumTy{}) ->
           bvSubPtrNum (tyToLLVMType ptrWidth lhsty) x . L.typedValue =<< mkLLVMValue y
-
         _ -> binop (arithop (L.Sub False False)) x y
-
     BVSbb _sz x y (FnConstantBool False) -> do
       binop (arithop (L.Sub False False)) x y
     BVSbb _sz x y b -> do
       d <- binop (arithop (L.Sub False False)) x y
       arithop (L.Sub False False) d . L.typedValue =<< carryValue (typeWidth x) b
-
     BVMul _sz x y -> binop (arithop (L.Mul False False)) x y
-    BVUnsignedLt x y     -> binop (icmpop L.Iult) x y
-    BVUnsignedLe x y     -> binop (icmpop L.Iule) x y
-    BVSignedLt x y       -> binop (icmpop L.Islt) x y
-    BVSignedLe x y       -> binop (icmpop L.Isle) x y
-    BVTestBit v n -> do -- TODO: Test this it had a FIX comment with no details.
+    BVUnsignedLt x y -> binop (icmpop L.Iult) x y
+    BVUnsignedLe x y -> binop (icmpop L.Iule) x y
+    BVSignedLt x y -> binop (icmpop L.Islt) x y
+    BVSignedLe x y -> binop (icmpop L.Isle) x y
+    BVTestBit v n -> do
+      -- TODO: Test this it had a FIX comment with no details.
       llvm_v <- mkLLVMValue v
       let in_typ = L.typedType llvm_v
       n' <- mkLLVMValue n
@@ -967,12 +991,12 @@ appToLLVM lhs app = bbArchConstraints $ do
       llvm_v <- mkLLVMValue v
       bitop L.Xor llvm_v (L.ValInteger (-1))
     BVAnd _sz x y -> binop band x y
-    BVOr _sz x y  -> binop bor  x y
+    BVOr _sz x y -> binop bor x y
     BVXor _sz x y -> binop bxor x y
-    BVShl _sz x y -> binop shl  x y
+    BVShl _sz x y -> binop shl x y
     BVSar _sz x y -> binop ashr x y
     BVShr _sz x y -> binop lshr x y
-    PopCount (w :: NatRepr n) v  -> do
+    PopCount (w :: NatRepr n) v -> do
       let popCountCallbackInst ops = popCountCallback ops @n
       fn <- asks $ popCountCallbackInst . archFns
       fn w v
@@ -981,7 +1005,6 @@ appToLLVM lhs app = bbArchConstraints $ do
     SadcOverflows x y c -> intrinsicOverflows "sadd" x y c
     UsbbOverflows x y c -> intrinsicOverflows "usub" x y c
     SsbbOverflows x y c -> intrinsicOverflows "ssub" x y c
-
     Bsf _sz v -> do
       let cttz = intrinsic ("llvm.cttz." ++ show (L.ppType typ)) typ [typ, L.iT 1]
       v' <- mkLLVMValue v
@@ -993,81 +1016,89 @@ appToLLVM lhs app = bbArchConstraints $ do
 
 -- | Evaluate a value as a pointer (log if we need to perform a non-constant
 -- inttoptr cast).
-llvmAsPtr :: HasCallStack
-          => String
-          -- ^ Context calling this helper (for logging purposes)
-          -> L.Type
-          -- ^ Type of value pointed to
-          -> L.Typed L.Value -- FnValue arch (BVType (ArchAddrWidth arch))
-          -- ^ Value to evaluate
-          -> BBLLVM arch (L.Typed L.Value)
+llvmAsPtr ::
+  HasCallStack =>
+  -- | Context calling this helper (for logging purposes)
+  String ->
+  -- | Type of value pointed to
+  L.Type ->
+  -- | Value to evaluate
+  L.Typed L.Value -> -- FnValue arch (BVType (ArchAddrWidth arch))
+  BBLLVM arch (L.Typed L.Value)
 llvmAsPtr ctx pointeeType ptrbv = do
   let pointerType = L.PtrTo pointeeType
-  logEvent $ LLVMLogEvent ctx
-           $ LogInfoIntToPtr
-           $ LLVMBitCastInfo (L.typedType ptrbv) pointerType
+  logEvent $
+    LLVMLogEvent ctx $
+      LogInfoIntToPtr $
+        LLVMBitCastInfo (L.typedType ptrbv) pointerType
   convop L.IntToPtr ptrbv pointerType
 
 -- | Evaluate a value as a pointer (log if we need to perform a non-constant
 -- inttoptr cast).
-llvmPtrAsBV :: HasCallStack
-            => String
-            -- ^ Context calling this helper (for logging purposes)
-            -> L.Typed L.Value -- FnValue arch (BVType (ArchAddrWidth arch))
-            -- ^ Value to evaluate
-            -> BBLLVM arch (L.Typed L.Value)
+llvmPtrAsBV ::
+  HasCallStack =>
+  -- | Context calling this helper (for logging purposes)
+  String ->
+  -- | Value to evaluate
+  L.Typed L.Value -> -- FnValue arch (BVType (ArchAddrWidth arch))
+  BBLLVM arch (L.Typed L.Value)
 llvmPtrAsBV ctx llvmPtr = do
   ptrWidth <- getPtrWidth'
   let bvTy = L.iT (fromIntegral ptrWidth)
-  logEvent $ LLVMLogEvent ctx
-           $ LogInfoPtrToInt
-           $ LLVMBitCastInfo bvTy (L.typedType llvmPtr)
+  logEvent $
+    LLVMLogEvent ctx $
+      LogInfoPtrToInt $
+        LLVMBitCastInfo bvTy (L.typedType llvmPtr)
   convop L.PtrToInt llvmPtr bvTy
 
 -- | We have a bvadd which is actually taking the address of a sub-field of a structure.
-bvAddPtrOffset :: L.Type ->
-                  FnValue arch tp ->
-                  Integer ->
-                  BBLLVM arch (L.Typed L.Value)
+bvAddPtrOffset ::
+  L.Type ->
+  FnValue arch tp ->
+  Integer ->
+  BBLLVM arch (L.Typed L.Value)
 bvAddPtrOffset _lhsty x 0 = mkLLVMValue x
-bvAddPtrOffset lhsty  x off = do
+bvAddPtrOffset lhsty x off = do
   ptrWidth <- getPtrWidth'
   if testBit off (ptrWidth - 1)
     then bvSubPtrNum lhsty x (L.integer (2 ^ ptrWidth - off))
     else ptrCase
-  where
-    xty' = L.PtrTo (L.Struct [ L.Vector (fromInteger off) (L.iT 8), lhsty ])
+ where
+  xty' = L.PtrTo (L.Struct [L.Vector (fromInteger off) (L.iT 8), lhsty])
 
-    -- We cast make x :: { <N x i8>, rhs } * so we can use a gep to get a pointer to it.
-    ptrCase = do
-      xV <- mkLLVMValue x
-      x' <- llvmBitCast "bvAddPtrOffset" xV xty'
-      llvmGEPFromPtr lhsty 1 x'
+  -- We cast make x :: { <N x i8>, rhs } * so we can use a gep to get a pointer to it.
+  ptrCase = do
+    xV <- mkLLVMValue x
+    x' <- llvmBitCast "bvAddPtrOffset" xV xty'
+    llvmGEPFromPtr lhsty 1 x'
 
 -- Not much we can do here but convert to/from a bv.  We know that x
 -- is a pointer, y a number.
-bvAddPtrSymbolic :: L.Type ->
-                    FnValue arch tp ->
-                    FnValue arch tp' ->
-                    BBLLVM arch (L.Typed L.Value)
+bvAddPtrSymbolic ::
+  L.Type ->
+  FnValue arch tp ->
+  FnValue arch tp' ->
+  BBLLVM arch (L.Typed L.Value)
 bvAddPtrSymbolic lhsty x y = do
   x' <- llvmPtrAsBV "bvAddPtrSymbolic" =<< mkLLVMValue x
-  r  <- arithop (L.Add False False) x' . L.typedValue =<< mkLLVMValue y
+  r <- arithop (L.Add False False) x' . L.typedValue =<< mkLLVMValue y
   llvmAsPtr "bvAddPtrSymbolic" lhsty r
 
 -- | There isn't much we can do when we have ptrs, except to cast.
-bvSubPtrNum :: L.Type ->
-                  FnValue arch tp ->
-                  L.Value ->
-                  BBLLVM arch (L.Typed L.Value)
+bvSubPtrNum ::
+  L.Type ->
+  FnValue arch tp ->
+  L.Value ->
+  BBLLVM arch (L.Typed L.Value)
 bvSubPtrNum lhsty x rhs = do
   x' <- llvmPtrAsBV "bvAddPtrSymbolic" =<< mkLLVMValue x
-  r  <- arithop (L.Sub False False) x' rhs
+  r <- arithop (L.Sub False False) x' rhs
   llvmAsPtr "bvAddPtrSymbolic" lhsty r
 
-bvSubPtrPtr :: FnValue arch tp ->
-               FnValue arch tp' ->
-               BBLLVM arch (L.Typed L.Value)
+bvSubPtrPtr ::
+  FnValue arch tp ->
+  FnValue arch tp' ->
+  BBLLVM arch (L.Typed L.Value)
 bvSubPtrPtr x y = do
   x' <- llvmPtrAsBV "bvAddPtrSymbolic" =<< mkLLVMValue x
   y' <- llvmPtrAsBV "bvAddPtrSymbolic" =<< mkLLVMValue y
@@ -1082,34 +1113,38 @@ llvmGEPFromPtr ::
 llvmGEPFromPtr pointeeType ofs ptrV = do
   let pointerType = L.PtrTo pointeeType
   let zeroV = L.Typed (L.iT 32) (L.int 0)
-      ofsV  = L.Typed (L.iT 32) (L.int ofs)
+      ofsV = L.Typed (L.iT 32) (L.int ofs)
   -- https://llvm.org/docs/GetElementPtr.html#what-is-the-first-index-of-the-gep-instruction
   L.Typed pointerType <$> evalInstr (L.GEP False ptrV [zeroV, ofsV])
 
 -- | Truncate and log.
-llvmTrunc :: forall arch.
-             String
-             -- ^ Context truncation is being generated in.
-             -> L.Typed L.Value
-             -> L.Type
-             -> BBLLVM arch (L.Typed L.Value)
+llvmTrunc ::
+  forall arch.
+  -- | Context truncation is being generated in.
+  String ->
+  L.Typed L.Value ->
+  L.Type ->
+  BBLLVM arch (L.Typed L.Value)
 llvmTrunc ctx lhs rhs = do
-  logEvent $ LLVMLogEvent ctx
-           $ LogInfoTrunc
-           $ LLVMBitCastInfo (L.typedType lhs) rhs
+  logEvent $
+    LLVMLogEvent ctx $
+      LogInfoTrunc $
+        LLVMBitCastInfo (L.typedType lhs) rhs
   convop L.Trunc lhs rhs
 
 -- | Bitcast and log.
-llvmBitCast :: forall arch.
-             String
-             -- ^ Context truncation is being generated in.
-             -> L.Typed L.Value
-             -> L.Type
-             -> BBLLVM arch (L.Typed L.Value)
+llvmBitCast ::
+  forall arch.
+  -- | Context truncation is being generated in.
+  String ->
+  L.Typed L.Value ->
+  L.Type ->
+  BBLLVM arch (L.Typed L.Value)
 llvmBitCast ctx lhs rhs = do
-  logEvent $ LLVMLogEvent ctx
-           $ LogInfoBitCast
-           $ LLVMBitCastInfo (L.typedType lhs) rhs
+  logEvent $
+    LLVMLogEvent ctx $
+      LogInfoBitCast $
+        LLVMBitCastInfo (L.typedType lhs) rhs
   convop L.BitCast lhs rhs
 
 -- | Create a singleton vector from a value.
@@ -1125,7 +1160,8 @@ checkEndian :: Endianness -> BBLLVM arch ()
 checkEndian end = do
   req <- asks $ archEndianness . archFns
   when (end /= req) $
-    error $ "Memory accesses must have byte order " ++ show req
+    error $
+      "Memory accesses must have byte order " ++ show req
 
 llvmFloatName :: FloatInfoRepr flt -> String
 llvmFloatName flt =
@@ -1157,19 +1193,21 @@ resolveLoadNameAndType memRep =
 -- | The type inference will infer a pointer-to-struct type for the
 -- pointer (or a conflict type if one is detected).  This will do a
 -- GEP or cast as required.
-pointerForMemOp :: forall arch. FnArchConstraints arch =>
-                   String
-                -- ^ Reason if we need to cast
-                -> FnValue arch (BVType (ArchAddrWidth arch))
-                -- ^ Value to evaluate
-                -> L.Type
-                -- ^ Type of value pointed to
-                -> BBLLVM arch (L.Typed L.Value)
+pointerForMemOp ::
+  forall arch.
+  FnArchConstraints arch =>
+  -- | Reason if we need to cast
+  String ->
+  -- | Value to evaluate
+  FnValue arch (BVType (ArchAddrWidth arch)) ->
+  -- | Type of value pointed to
+  L.Type ->
+  BBLLVM arch (L.Typed L.Value)
 pointerForMemOp ctx ptr pointeeType = do
   ptrV <- mkLLVMValue ptr
   getInferredType ptr >>= \case
-    Just FPtrTy {}      -> llvmGEPFromPtr pointeeType 0 ptrV
-    Just FConflictTy {} -> llvmAsPtr ctx pointeeType ptrV
+    Just FPtrTy{} -> llvmGEPFromPtr pointeeType 0 ptrV
+    Just FConflictTy{} -> llvmAsPtr ctx pointeeType ptrV
     t -> error $ "Unexpected type at pointerForMemOp " ++ show (pretty t)
 
 -- | Convert an assignment to a llvm expression
@@ -1195,7 +1233,6 @@ rhsToLLVM lhs rhs =
       p <- pointerForMemOp "rhsToLLVM(FnReadMem)" ptr typeOfResult'
       v <- evalInstr (L.Load p Nothing Nothing)
       setAssignIdValue lhs (L.Typed typeOfResult' v)
-
     FnCondReadMem memRepr cond ptr passthru -> do
       (loadName, eltType) <- resolveLoadNameAndType memRepr
       let intr = llvmMaskedLoad 1 loadName eltType
@@ -1210,16 +1247,15 @@ rhsToLLVM lhs rhs =
       -- cast as a vec so we can call the conditional read intrinsic
       llvmAddr <- llvmBitCast "rhsToLLVM(FnCondReadMem)" p (L.PtrTo (L.Vector 1 eltType))
       let llvmAlign = L.Typed (L.iT 32) (L.ValInteger 0)
-      llvmCond     <- singletonVector =<< mkLLVMValue cond
+      llvmCond <- singletonVector =<< mkLLVMValue cond
       llvmPassthru <- singletonVector =<< mkLLVMValue passthru
-      rv <- call intr [ llvmAddr, llvmAlign, llvmCond, llvmPassthru ]
+      rv <- call intr [llvmAddr, llvmAlign, llvmCond, llvmPassthru]
       r <- evalInstr $ L.ExtractElt rv (L.ValInteger 0)
       setAssignIdValue lhs (L.Typed eltType r)
-
     FnEvalArchFn f -> do
       let archFnCallbackInst ops = archFnCallback ops @tp
-      fn <- asks $ archFnCallbackInst  . archFns
-      setAssignIdValue lhs  =<< fn f
+      fn <- asks $ archFnCallbackInst . archFns
+      setAssignIdValue lhs =<< fn f
     FnAddrWidthConstant i -> do
       let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
       -- FIXME: this should always return a type, not Maybe
@@ -1227,16 +1263,21 @@ rhsToLLVM lhs rhs =
       let ty = tyToLLVMType ptrWidth typeOfResult
       let llvmRhs = case typeOfResult of
             FPtrTy ty'
-              | i == 0    -> L.nullPtr (tyToLLVMType ptrWidth ty')
-              | otherwise -> L.Typed ty $
+              | i == 0 -> L.nullPtr (tyToLLVMType ptrWidth ty')
+              | otherwise ->
+                  L.Typed ty $
                     L.ValConstExpr (L.ConstConv L.IntToPtr (L.Typed (L.iT (fromIntegral ptrWidth)) (L.integer i)) ty)
-            _             -> L.Typed ty $  L.integer i
+            _ -> L.Typed ty $ L.integer i
       setAssignIdValue lhs llvmRhs
 
-resolveFunctionEntry :: FnValue arch (BVType (ArchAddrWidth arch))
-                     -> BBLLVM arch (L.Typed L.Value
-                                    , [Maybe FTy]
-                                    , Maybe (Maybe FTy))
+resolveFunctionEntry ::
+  FnValue arch (BVType (ArchAddrWidth arch)) ->
+  BBLLVM
+    arch
+    ( L.Typed L.Value
+    , [Maybe FTy]
+    , Maybe (Maybe FTy)
+    )
 resolveFunctionEntry dest =
   case dest of
     FnFunctionEntryValue dest_ftp nm -> do
@@ -1244,13 +1285,18 @@ resolveFunctionEntry dest =
       withArchConstraints ctx $ do
         let sym = L.Symbol (BSC.unpack nm)
         constraints <- asks moduleConstraints
-        let fty = fromMaybe (error "fnTypes 1")
-                  (Map.lookup nm (mcExtFunTypes constraints))
+        let fty =
+              fromMaybe
+                (error "fnTypes 1")
+                (Map.lookup nm (mcExtFunTypes constraints))
         let resolvetv tv = Map.lookup tv (mcTypeMap constraints)
             args = map resolvetv (fttvArgs fty)
-            retty  = fmap resolvetv (fttvRet fty)
-        return (L.Typed (functionTypeToLLVM' dest_ftp args retty) (L.ValSymbol sym)
-               , args, retty)
+            retty = fmap resolvetv (fttvRet fty)
+        return
+          ( L.Typed (functionTypeToLLVM' dest_ftp args retty) (L.ValSymbol sym)
+          , args
+          , retty
+          )
     _ -> do
       error "Do not support indirect calls."
 
@@ -1260,94 +1306,106 @@ bbArchConstraints m = do
   ctx <- ask
   withArchConstraints ctx m
 
-stmtToLLVM :: forall arch
-           .  HasCallStack
-           => FnStmt arch
-           -> BBLLVM arch ()
+stmtToLLVM ::
+  forall arch.
+  HasCallStack =>
+  FnStmt arch ->
+  BBLLVM arch ()
 stmtToLLVM stmt = bbArchConstraints $ do
   comment (show $ pretty stmt)
   case stmt of
-   FnComment _ -> return ()
-   FnAssignStmt (FnAssignment lhs rhs) -> do
-     rhsToLLVM lhs rhs
-   FnWriteMem addr v -> do
-     vty <- fromMaybe FUnknownTy <$> getInferredType v
-     let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
-     let vty' = tyToLLVMType ptrWidth vty
-     llvmPtr <- pointerForMemOp "rhsToLLVM(FnWriteMem)" addr vty'
-     llvmVal <- mkLLVMValue v
-     effect $ L.Store llvmVal llvmPtr Nothing Nothing
-
-   FnCondWriteMem cond addr v memRepr -> do
-     -- Obtain llvm.masked.store intrinsic and ensure it will be declared.
-     (loadName, eltType) <- resolveLoadNameAndType memRepr
-     let intr = llvmMaskedStore 1 loadName eltType
-     addIntrinsic intr
-     -- Compute value to write
-     llvmValue <- singletonVector =<< mkLLVMValue v
-     -- Convert addr to appropriate pointer.
-     vty <- fromMaybe FUnknownTy <$> getInferredType v
-     let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
-     let vty' = tyToLLVMType ptrWidth vty
-     p <- pointerForMemOp "rhsToLLVM(FnCondWriteMem)" addr vty'
-     llvmAddr <- llvmBitCast "rhsToLLVM(FnCondWriteMem)" p (L.PtrTo (L.Vector 1 eltType))
-     -- Just use zero alignment
-     let llvmAlign = L.Typed (L.iT 32) (L.ValInteger 0)
-     -- Construct mask
-     llvmMask <- singletonVector =<< mkLLVMValue cond
-     -- Call llvmn.masked.store intrinsic
-     call_ intr [ llvmValue, llvmAddr, llvmAlign, llvmMask ]
-   FnCall dest args mretv -> do
-     (llvmFn, args', retty') <- resolveFunctionEntry dest
-     let goSubtype (Some v) = mkLLVMSubtypeValue v
-     llvmArgs <- zipWithM goSubtype args args'
-     -- Assign return values
-     case mretv of
-       Nothing -> do
-         call_ llvmFn llvmArgs
-       Just (Some rvar) -> do
-         retv <- call llvmFn llvmArgs
-         rvarty <- getInferredTypeForAssignIdBBLLVM (frAssignId rvar)
-         retv' <- coerceForSubtype (fromMaybe (error "Missing return type") retty') rvarty retv
-         setAssignIdValue (frAssignId rvar) retv'
-
-   FnArchStmt astmt -> do
-     fn <- asks $ archStmtCallback . archFns
-     fn astmt
+    FnComment _ -> return ()
+    FnAssignStmt (FnAssignment lhs rhs) -> do
+      rhsToLLVM lhs rhs
+    FnWriteMem addr v -> do
+      vty <- fromMaybe FUnknownTy <$> getInferredType v
+      let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
+      let vty' = tyToLLVMType ptrWidth vty
+      llvmPtr <- pointerForMemOp "rhsToLLVM(FnWriteMem)" addr vty'
+      llvmVal <- mkLLVMValue v
+      effect $ L.Store llvmVal llvmPtr Nothing Nothing
+    FnCondWriteMem cond addr v memRepr -> do
+      -- Obtain llvm.masked.store intrinsic and ensure it will be declared.
+      (loadName, eltType) <- resolveLoadNameAndType memRepr
+      let intr = llvmMaskedStore 1 loadName eltType
+      addIntrinsic intr
+      -- Compute value to write
+      llvmValue <- singletonVector =<< mkLLVMValue v
+      -- Convert addr to appropriate pointer.
+      vty <- fromMaybe FUnknownTy <$> getInferredType v
+      let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
+      let vty' = tyToLLVMType ptrWidth vty
+      p <- pointerForMemOp "rhsToLLVM(FnCondWriteMem)" addr vty'
+      llvmAddr <- llvmBitCast "rhsToLLVM(FnCondWriteMem)" p (L.PtrTo (L.Vector 1 eltType))
+      -- Just use zero alignment
+      let llvmAlign = L.Typed (L.iT 32) (L.ValInteger 0)
+      -- Construct mask
+      llvmMask <- singletonVector =<< mkLLVMValue cond
+      -- Call llvmn.masked.store intrinsic
+      call_ intr [llvmValue, llvmAddr, llvmAlign, llvmMask]
+    FnCall dest args mretv -> do
+      (llvmFn, args', retty') <- resolveFunctionEntry dest
+      let goSubtype (Some v) = mkLLVMSubtypeValue v
+      llvmArgs <- zipWithM goSubtype args args'
+      -- Assign return values
+      case mretv of
+        Nothing -> do
+          call_ llvmFn llvmArgs
+        Just (Some rvar) -> do
+          retv <- call llvmFn llvmArgs
+          rvarty <- getInferredTypeForAssignIdBBLLVM (frAssignId rvar)
+          retv' <- coerceForSubtype (fromMaybe (error "Missing return type") retty') rvarty retv
+          setAssignIdValue (frAssignId rvar) retv'
+    FnArchStmt astmt -> do
+      fn <- asks $ archStmtCallback . archFns
+      fn astmt
 
 llvmBlockLabel :: FnBlockLabel w -> L.BlockLabel
 llvmBlockLabel = L.Named . L.Ident . fnBlockLabelString
 
 getPtrWidth :: forall arch. BBLLVM arch (NatRepr (ArchAddrWidth arch))
 getPtrWidth =
-  asks (\ctx -> withArchConstraints ctx $
-                addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch))))
+  asks
+    ( \ctx ->
+        withArchConstraints ctx $
+          addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
+    )
 
 getPtrWidth' :: BBLLVM arch Int
 getPtrWidth' = widthVal <$> getPtrWidth
 
-coerceForSubtype :: Maybe FTy -> Maybe FTy -> L.Typed L.Value ->
-                    BBLLVM arch (L.Typed L.Value)
+coerceForSubtype ::
+  Maybe FTy ->
+  Maybe FTy ->
+  L.Typed L.Value ->
+  BBLLVM arch (L.Typed L.Value)
 coerceForSubtype m_vTy m_tgtTy v = do
   ptrWidth <- getPtrWidth'
   case (fromMaybe FUnknownTy m_vTy, fromMaybe FUnknownTy m_tgtTy) of
     (t, t') | tyToLLVMType ptrWidth t == tyToLLVMType ptrWidth t' -> pure v
-    (FPtrTy {}, FPtrTy tr) ->
+    (FPtrTy{}, FPtrTy tr) ->
       llvmBitCast "coerceForSubtype" v (L.PtrTo (tyToLLVMType ptrWidth tr))
     -- We are casting from a ptr to a non-ptr, probably due to a
     -- limitation in the type inference (e.g. during cycle detection)
-    (FPtrTy {}, _)       -> llvmPtrAsBV "coerceForSubtype" v
-    (_, FPtrTy ty)       ->
+    (FPtrTy{}, _) -> llvmPtrAsBV "coerceForSubtype" v
+    (_, FPtrTy ty) ->
       llvmAsPtr "coerceForSubtype" (tyToLLVMType ptrWidth ty) v
     (t, t') -> do
       thisLabel <- gets bbThisLabel :: BBLLVM arch L.BlockLabel
-      error $ show $ "Type mismatch at " <> viaShow thisLabel <>
-        ": " <> pretty t <> " and " <> pretty t'
+      error $
+        show $
+          "Type mismatch at "
+            <> viaShow thisLabel
+            <> ": "
+            <> pretty t
+            <> " and "
+            <> pretty t'
 
-mkLLVMSubtypeValue :: forall arch tp.
-                      FnValue arch tp
-                   -> Maybe FTy
-                   -> BBLLVM arch (L.Typed L.Value)
+mkLLVMSubtypeValue ::
+  forall arch tp.
+  FnValue arch tp ->
+  Maybe FTy ->
+  BBLLVM arch (L.Typed L.Value)
 mkLLVMSubtypeValue v m_tgtTy = do
   m_vTy <- getInferredType v
   coerceForSubtype m_vTy m_tgtTy =<< mkLLVMValue v
@@ -1365,16 +1423,17 @@ addTargetPhiValues tgt = do
   values <- V.zipWithM doSubtype (fnJumpPhiValues tgt) tgtPhis
 
   -- Add this block value to phi assignment
-  let updateVar :: Map L.BlockLabel (Int, L.Value)
-                -> L.Typed L.Value
-                -> BBLLVM arch (Map L.BlockLabel (Int, L.Value))
+  let updateVar ::
+        Map L.BlockLabel (Int, L.Value) ->
+        L.Typed L.Value ->
+        BBLLVM arch (Map L.BlockLabel (Int, L.Value))
       -- updateVar prevVars (Some v@(FnPhiValue phiVar)) = do
-        -- constraints <- asks moduleConstraints
-        -- fn <- asks funName
-        -- let tyV = mcAssignTyVars constraints Map.! fn Map.! unFnPhiVar phiVar
-        -- let inferredType = mcTypeMap constraints Map.! tyV
-        -- thisVal <- mkLLVMValue v
-        -- pure $! Map.insertWith (const (first (+ 1))) thisLabel (1, L.typedValue thisVal) prevVars
+      -- constraints <- asks moduleConstraints
+      -- fn <- asks funName
+      -- let tyV = mcAssignTyVars constraints Map.! fn Map.! unFnPhiVar phiVar
+      -- let inferredType = mcTypeMap constraints Map.! tyV
+      -- thisVal <- mkLLVMValue v
+      -- pure $! Map.insertWith (const (first (+ 1))) thisLabel (1, L.typedValue thisVal) prevVars
       updateVar prevVars v = do
         pure $! Map.insertWith (const (first (+ 1))) thisLabel (1, L.typedValue v) prevVars
   m <- BBLLVM $ use $ funStateLens . funBlockPhiMapLens
@@ -1382,9 +1441,10 @@ addTargetPhiValues tgt = do
   newEntries <- V.zipWithM updateVar curEntries values
   BBLLVM $ funStateLens . funBlockPhiMapLens .= Map.insert tgtLbl newEntries m
 
-termStmtToLLVM :: HasCallStack
-               => FnTermStmt arch
-               -> BBLLVM arch ()
+termStmtToLLVM ::
+  HasCallStack =>
+  FnTermStmt arch ->
+  BBLLVM arch ()
 termStmtToLLVM tm =
   case tm of
     FnJump tgt -> do
@@ -1403,7 +1463,7 @@ termStmtToLLVM tm =
       traverse_ addTargetPhiValues vec
       let dests = V.toList $ llvmBlockLabel . fnJumpLabel <$> vec
       markNeedSwitchFailLabel
-      effect $ L.Switch idx' (L.Named (L.Ident switchFailLabel)) (zip [0..] dests)
+      effect $ L.Switch idx' (L.Named (L.Ident switchFailLabel)) (zip [0 ..] dests)
     FnRet mret -> do
       ftp <- asks funRetType
       case (ftp, mret) of
@@ -1427,10 +1487,11 @@ termStmtToLLVM tm =
             _ -> do
               retv <- evalInstr $ L.Call False callTargetType callTargetValue llvmArgs
               -- FIXME: clean this up
-              retv' <- coerceForSubtype
-                       (fromMaybe (error "Missing return type") retty')
-                       (fromMaybe (error "Missing return type") fret)
-                       (L.Typed res retv)
+              retv' <-
+                coerceForSubtype
+                  (fromMaybe (error "Missing return type") retty')
+                  (fromMaybe (error "Missing return type") fret)
+                  (L.Typed res retv)
               ret retv'
         _ -> do
           error "Expected function type to tail call target."
@@ -1445,25 +1506,26 @@ resolvePhiStmt ::
   [L.Stmt]
 resolvePhiStmt constraints function phiValues b =
   let
-      ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
-      phiAssignId = viewSome unFnPhiVar (phiFnRepVar b)
-      lnm = L.Ident (phiLLVMIdent b)
-      -- If we inferred a type for the phi variable by constraint solving, it
-      -- takes precedence over the type we inferred at recovery time.
-      llvmType :: L.Type
-      llvmType  =
-        case getKnownInferredType constraints function phiAssignId of
-          Just inferredType -> tyToLLVMType ptrWidth inferredType
-          Nothing -> viewSome (typeToLLVMType . fnPhiVarType) (phiFnRepVar b)
-      llvmPhiValues :: [(L.Value, L.BlockLabel)]
-      llvmPhiValues = [ binding
-                      | (lbl, (llvmCnt, llvmVal)) <- Map.toList phiValues
-                      , binding <- replicate llvmCnt (llvmVal, lbl)
-                      ]
-      showPhiAssignIdsInComments = True
-  in
-  [L.Effect (L.Comment (show phiAssignId)) [] | showPhiAssignIdsInComments]
-  ++ [L.Result lnm (L.Phi llvmType llvmPhiValues) []]
+    ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
+    phiAssignId = viewSome unFnPhiVar (phiFnRepVar b)
+    lnm = L.Ident (phiLLVMIdent b)
+    -- If we inferred a type for the phi variable by constraint solving, it
+    -- takes precedence over the type we inferred at recovery time.
+    llvmType :: L.Type
+    llvmType =
+      case getKnownInferredType constraints function phiAssignId of
+        Just inferredType -> tyToLLVMType ptrWidth inferredType
+        Nothing -> viewSome (typeToLLVMType . fnPhiVarType) (phiFnRepVar b)
+    llvmPhiValues :: [(L.Value, L.BlockLabel)]
+    llvmPhiValues =
+      [ binding
+      | (lbl, (llvmCnt, llvmVal)) <- Map.toList phiValues
+      , binding <- replicate llvmCnt (llvmVal, lbl)
+      ]
+    showPhiAssignIdsInComments = True
+   in
+    [L.Effect (L.Comment (show phiAssignId)) [] | showPhiAssignIdsInComments]
+      ++ [L.Result lnm (L.Phi llvmType llvmPhiValues) []]
 
 -- | Construct a basic block from a block result
 toBasicBlock ::
@@ -1477,95 +1539,112 @@ toBasicBlock ::
   L.BasicBlock
 toBasicBlock constraints function phiMap res
   | V.length phiVars /= V.length phiAssignment =
-    error "Phi variables length does not match phi assignment."
+      error "Phi variables length does not match phi assignment."
   | otherwise =
-    L.BasicBlock { L.bbLabel = Just lbl
-                 , L.bbStmts = phiStmts ++ reverse (bbStmts finalState)
-                 }
-  where b = fnBlock res
-        phiVars = llvmPhiVars res
-        phiAssignment = phiAssignmentForBlock phiMap (fbLabel b)
-        lbl = L.Named (L.Ident (fnBlockLabelString (fbLabel b)))
-        phiStmts = join . V.toList $ V.zipWith (resolvePhiStmt constraints function) phiAssignment phiVars
-        finalState = finalBBState res
+      L.BasicBlock
+        { L.bbLabel = Just lbl
+        , L.bbStmts = phiStmts ++ reverse (bbStmts finalState)
+        }
+ where
+  b = fnBlock res
+  phiVars = llvmPhiVars res
+  phiAssignment = phiAssignmentForBlock phiMap (fbLabel b)
+  lbl = L.Named (L.Ident (fnBlockLabelString (fbLabel b)))
+  phiStmts = join . V.toList $ V.zipWith (resolvePhiStmt constraints function) phiAssignment phiVars
+  finalState = finalBBState res
 
 -- | Information relating a Macaw funcation variable and LLVM identifier.
-data PhiBinding arch =
-  PhiBinding { phiFnRepVar :: !(Some (FnPhiVar arch))
-               -- ^ Function representation variable.
-             , phiLLVMIdent :: !String
-               -- ^ LLVM identifier for Phi variable
-             }
+data PhiBinding arch = PhiBinding
+  { phiFnRepVar :: !(Some (FnPhiVar arch))
+  -- ^ Function representation variable.
+  , phiLLVMIdent :: !String
+  -- ^ LLVM identifier for Phi variable
+  }
 
 -- | Add a phi var with the node info so that we have a ident to
 -- reference it by and queue up work to assign the value later.
-addPhiBinding :: HasCallStack
-              => Some (FnPhiVar arch)
-              -> BBLLVM arch (PhiBinding arch)
+addPhiBinding ::
+  HasCallStack =>
+  Some (FnPhiVar arch) ->
+  BBLLVM arch (PhiBinding arch)
 addPhiBinding (Some phiVar) = do
   L.Ident nm <- freshName
   ptrWidth <- getPtrWidth'
-  m_fty    <- getInferredTypeForAssignIdBBLLVM (unFnPhiVar phiVar)
+  m_fty <- getInferredTypeForAssignIdBBLLVM (unFnPhiVar phiVar)
   let llvmType =
         maybe (typeToLLVMType (fnPhiVarType phiVar)) (tyToLLVMType ptrWidth) m_fty
   setAssignIdValue (unFnPhiVar phiVar) (L.Typed llvmType (L.ValIdent (L.Ident nm)))
-  pure $! PhiBinding { phiFnRepVar = Some phiVar
-                     , phiLLVMIdent = nm
-                     }
+  pure $!
+    PhiBinding
+      { phiFnRepVar = Some phiVar
+      , phiLLVMIdent = nm
+      }
 
-addLLVMBlock :: forall arch
-            .  FunLLVMContext arch
-               -- ^ Context for block
-            -> FunState arch
-            -> FnBlock arch
-               -- ^ Block to generate
-            -> (FunState arch, LLVMBlockResult arch)
+addLLVMBlock ::
+  forall arch.
+  -- | Context for block
+  FunLLVMContext arch ->
+  FunState arch ->
+  -- | Block to generate
+  FnBlock arch ->
+  (FunState arch, LLVMBlockResult arch)
 addLLVMBlock ctx fs b = (finFS, res)
-  where s0 = BBLLVMState { bbThisLabel = llvmBlockLabel (fbLabel b)
-                         , bbAssignValMap = Map.empty
-                         , bbStmts        = []
-                         , bbLLVMLogEvents = []
-                         }
-        go :: BBLLVM arch (V.Vector (PhiBinding arch))
-        go = do
-          -- Add statements for Phi nodes
-          bindings <- traverse addPhiBinding (fbPhiVars b)
-          -- Add statements
-          mapM_ stmtToLLVM (fbStmts b)
-          -- Add term statement
-          termStmtToLLVM (fbTerm b)
-          -- Results
-          pure bindings
-        (phiBindings, BBLLVMPair finFS s) =
-          runState (runReaderT (unBBLLVM go) ctx) (BBLLVMPair fs s0)
+ where
+  s0 =
+    BBLLVMState
+      { bbThisLabel = llvmBlockLabel (fbLabel b)
+      , bbAssignValMap = Map.empty
+      , bbStmts = []
+      , bbLLVMLogEvents = []
+      }
+  go :: BBLLVM arch (V.Vector (PhiBinding arch))
+  go = do
+    -- Add statements for Phi nodes
+    bindings <- traverse addPhiBinding (fbPhiVars b)
+    -- Add statements
+    mapM_ stmtToLLVM (fbStmts b)
+    -- Add term statement
+    termStmtToLLVM (fbTerm b)
+    -- Results
+    pure bindings
+  (phiBindings, BBLLVMPair finFS s) =
+    runState (runReaderT (unBBLLVM go) ctx) (BBLLVMPair fs s0)
 
-        res = LLVMBlockResult { fnBlock = b
-                              , llvmPhiVars = phiBindings
-                              , finalBBState = s
-                              }
+  res =
+    LLVMBlockResult
+      { fnBlock = b
+      , llvmPhiVars = phiBindings
+      , finalBBState = s
+      }
 
 ------------------------------------------------------------------------
 -- Inline assembly
 
 -- | Attributes to annote inline assembly.
-newtype AsmAttrs = AsmAttrs { asmSideeffect :: Bool }
+newtype AsmAttrs = AsmAttrs {asmSideeffect :: Bool}
 
 -- | Indicates all side effects  of inline assembly are captured in the constraint list.
 noSideEffect :: AsmAttrs
-noSideEffect = AsmAttrs { asmSideeffect = False }
+noSideEffect = AsmAttrs{asmSideeffect = False}
 
 -- | Indicates asm may have side effects that are not captured in the
 -- constraint list.
 sideEffect :: AsmAttrs
-sideEffect = AsmAttrs { asmSideeffect = True }
+sideEffect = AsmAttrs{asmSideeffect = True}
 
 -- | Call some inline assembly
-callAsm :: AsmAttrs -- ^ Asm attrs
-        -> L.Type   -- ^ Return type
-        -> String   -- ^ Code
-        -> String   -- ^ Args code
-        -> [L.Typed L.Value] -- ^ Arguments
-        -> BBLLVM arch (L.Typed L.Value)
+callAsm ::
+  -- | Asm attrs
+  AsmAttrs ->
+  -- | Return type
+  L.Type ->
+  -- | Code
+  String ->
+  -- | Args code
+  String ->
+  -- | Arguments
+  [L.Typed L.Value] ->
+  BBLLVM arch (L.Typed L.Value)
 callAsm attrs resType asmCode asmArgs args = do
   let argTypes = L.typedType <$> args
       ftp = L.PtrTo (L.FunTy resType argTypes False)
@@ -1573,11 +1652,16 @@ callAsm attrs resType asmCode asmArgs args = do
   L.Typed resType <$> evalInstr (L.Call False ftp f args)
 
 -- | Call some inline assembly that does not return a value.
-callAsm_ :: AsmAttrs -- ^ Asm attrs
-         -> String   -- ^ Code
-         -> String   -- ^ Args code
-         -> [L.Typed L.Value] -- ^ Arguments
-         -> BBLLVM arch ()
+callAsm_ ::
+  -- | Asm attrs
+  AsmAttrs ->
+  -- | Code
+  String ->
+  -- | Args code
+  String ->
+  -- | Arguments
+  [L.Typed L.Value] ->
+  BBLLVM arch ()
 callAsm_ attrs asmCode asmArgs args = do
   let argTypes = L.typedType <$> args
   let ftp = L.PtrTo (L.FunTy (L.PrimType L.Void) argTypes False)
@@ -1588,11 +1672,9 @@ callAsm_ attrs asmCode asmArgs args = do
 ------------------------------------------------------------------------
 -- Translating functions
 
-data LLVMTransState =
-  LLVMTransState
-  {
-    llvmTransIntrinsicMap :: !IntrinsicMap,
-    llvmTransLogEvents :: ![LLVMLogEvent]
+data LLVMTransState = LLVMTransState
+  { llvmTransIntrinsicMap :: !IntrinsicMap
+  , llvmTransLogEvents :: ![LLVMLogEvent]
   }
 
 -- | The LLVM translate monad records all the intrinsics detected when
@@ -1612,23 +1694,23 @@ argIdent i = L.Ident ("arg" ++ show i)
 memAnn :: Ann.MCAddr -> (Word64, FnMemAccessType) -> Ann.MCMemoryEvent
 memAnn a (o, tp) =
   Ann.MCMemoryEvent
-  { Ann.eventAddr = fromIntegral a + fromIntegral o
-  , Ann.eventInfo =
-      case tp of
-        HeapAccess -> Ann.HeapAccess
-        StackAccess -> Ann.BinaryOnlyAccess
-  }
+    { Ann.eventAddr = fromIntegral a + fromIntegral o
+    , Ann.eventInfo =
+        case tp of
+          HeapAccess -> Ann.HeapAccess
+          StackAccess -> Ann.BinaryOnlyAccess
+    }
 
 mkStackExpr :: Integer -> Ann.Expr Ann.BlockVar
 mkStackExpr o
   | o < 0 =
-    let oExpr = Ann.BVDecimal (fromInteger (negate o)) 64
-     in Ann.BVSub (Ann.Var Ann.StackHigh) oExpr
+      let oExpr = Ann.BVDecimal (fromInteger (negate o)) 64
+       in Ann.BVSub (Ann.Var Ann.StackHigh) oExpr
   | o == 0 = Ann.Var Ann.StackHigh
   | otherwise =
-    let oExpr :: Ann.Expr Ann.BlockVar
-        oExpr = Ann.BVDecimal (fromInteger o) 64
-     in Ann.BVAdd (Ann.Var Ann.StackHigh) oExpr
+      let oExpr :: Ann.Expr Ann.BlockVar
+          oExpr = Ann.BVDecimal (fromInteger o) 64
+       in Ann.BVAdd (Ann.Var Ann.StackHigh) oExpr
 
 newtype BlockAnnGen a = BlockAnnGen (Except String a)
   deriving (Functor, Applicative, Monad, MonadError String)
@@ -1645,21 +1727,20 @@ mkBoundLocExpr (RegLoc xr) =
   case xr of
     X86_GP r ->
       pure $! Ann.Var (Ann.InitGPReg64 r)
-    X86_FlagReg r->
+    X86_FlagReg r ->
       pure $! Ann.Var (Ann.InitFlagReg r)
     _ ->
       throwError $ "Do not support register " ++ show xr
 mkBoundLocExpr (StackOffLoc o tp) =
-  if o < 0 then
-    case tp of
+  if o < 0
+    then case tp of
       BVMemRepr byteCount LittleEndian -> do
         let stackExpr = mkStackExpr (toInteger o)
             bitCount = 8 * natValue byteCount
         pure $! Ann.Var (Ann.MCStack stackExpr bitCount)
       _ ->
         throwError $ "Do not support stack references with type " ++ show tp
-   else
-    throwError "Do not support positive stack offsets."
+    else throwError "Do not support positive stack offsets."
 
 -- | Generate preconditions for a phi variable to associate LLVM phi
 -- variables with machine code.
@@ -1667,7 +1748,7 @@ addPhiPrecond :: PhiBinding X86_64 -> [Ann.Expr Ann.BlockVar] -> BlockAnnGen [An
 addPhiPrecond b prev0 =
   case phiFnRepVar b of
     Some phiVar -> do
-          -- Get expression representing LLVM value.
+      -- Get expression representing LLVM value.
       let phiExpr :: Ann.Expr Ann.BlockVar
           phiExpr = Ann.Var (Ann.LLVMVar (Text.pack (phiLLVMIdent b)))
           -- Assert pfi expression is equal to each machine location.
@@ -1694,9 +1775,11 @@ mkInvPrecond (FnStackOff o x) =
 
 -- | Generate pair containing block label in LLVM and annotations from
 -- block.
-getBlockAnn :: BSC.ByteString -- ^ Name of function
-            -> LLVMBlockResult X86_64
-            -> Either String (String, Ann.BlockAnn)
+getBlockAnn ::
+  -- | Name of function
+  BSC.ByteString ->
+  LLVMBlockResult X86_64 ->
+  Either String (String, Ann.BlockAnn)
 getBlockAnn fnm blockRes = do
   let b = fnBlock blockRes
   let lbl = fbLabel b
@@ -1709,19 +1792,21 @@ getBlockAnn fnm blockRes = do
     preconds <- foldrM addPhiPrecond invPreconds (llvmPhiVars blockRes)
 
     let isTail = case fbTerm b of
-          FnTailCall {} -> True
-          _             -> False
+          FnTailCall{} -> True
+          _ -> False
 
     -- Generate memory event annotation given base address, offset and address type.
-    let ann = Ann.ReachableBlockAnn { Ann.blockAddr = addr
-                                    , Ann.blockCodeSize = fbSize b
-                                    , Ann.blockX87Top = blockInitX87TopReg pr
-                                    , Ann.blockDFFlag = blockInitDF pr
-                                    , Ann.blockPreconditions = preconds
-                                    , Ann.blockAllocas = Map.empty
-                                    , Ann.mcMemoryEvents = V.toList $ memAnn addr <$> fbMemInsnAddrs b
-                                    , Ann.isTailCall     = isTail
-                                    }
+    let ann =
+          Ann.ReachableBlockAnn
+            { Ann.blockAddr = addr
+            , Ann.blockCodeSize = fbSize b
+            , Ann.blockX87Top = blockInitX87TopReg pr
+            , Ann.blockDFFlag = blockInitDF pr
+            , Ann.blockPreconditions = preconds
+            , Ann.blockAllocas = Map.empty
+            , Ann.mcMemoryEvents = V.toList $ memAnn addr <$> fbMemInsnAddrs b
+            , Ann.isTailCall = isTail
+            }
     pure (fnBlockLabelString lbl, Ann.ReachableBlock ann)
 
 -- | This translates the function to LLVM and returns the define.
@@ -1733,17 +1818,18 @@ getBlockAnn fnm blockRes = do
 -- Users should declare intrinsics via 'declareIntrinsics' before
 -- using this function.  They should also add any referenced
 -- functions.
-defineFunction :: forall arch
-               .  (LLVMArchConstraints arch, arch ~ X86_64)
-               => LLVMArchSpecificOps arch
-                  -- ^ Architecture specific operations
-               -> LLVMGenOptions
-                  -- ^ Options for generating LLVM
-               -> ModuleConstraints arch
-                  -- ^ Types inferred from constraint-solving
-               -> Function arch
-                  -- ^ Function to translate
-               -> LLVMTrans (L.Define, Either String Ann.FunctionAnn)
+defineFunction ::
+  forall arch.
+  (LLVMArchConstraints arch, arch ~ X86_64) =>
+  -- | Architecture specific operations
+  LLVMArchSpecificOps arch ->
+  -- | Options for generating LLVM
+  LLVMGenOptions ->
+  -- | Types inferred from constraint-solving
+  ModuleConstraints arch ->
+  -- | Function to translate
+  Function arch ->
+  LLVMTrans (L.Define, Either String Ann.FunctionAnn)
 defineFunction archOps genOpts constraints f = do
   let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
   let mkInputReg :: (Some TypeRepr, TyVar) -> Int -> L.Typed L.Ident
@@ -1756,35 +1842,40 @@ defineFunction archOps genOpts constraints f = do
   let argsWithTyVars = zip (fnArgTypes (fnType f)) (fttvArgs fty)
 
   let inputArgs :: [L.Typed L.Ident]
-      inputArgs = zipWith mkInputReg argsWithTyVars [0..]
+      inputArgs = zipWith mkInputReg argsWithTyVars [0 ..]
 
   let fret = fmap (\tv -> Map.lookup tv (mcTypeMap constraints)) (fttvRet fty)
 
-  let -- Needed for GHC >= 9
+  let
+    -- Needed for GHC >= 9
     id' :: (LLVMArchConstraints arch => a) -> a
     id' a = a
 
   let ctx :: FunLLVMContext arch
-      ctx = FunLLVMContext { archFns = archOps
-                           , funLLVMGenOptions = genOpts
-                           , funAddr = fnAddr f
-                           , funName = fnName f
-                           , funArgs = V.fromList $ fmap L.ValIdent <$> inputArgs
-                           , funRetType = fret
-                           , funAllocaCount = 0
-                           , moduleConstraints = constraints
-                           , funBlockPhis = phiMapFromFunction f
-                           , withArchConstraints = id'
-                           }
+      ctx =
+        FunLLVMContext
+          { archFns = archOps
+          , funLLVMGenOptions = genOpts
+          , funAddr = fnAddr f
+          , funName = fnName f
+          , funArgs = V.fromList $ fmap L.ValIdent <$> inputArgs
+          , funRetType = fret
+          , funAllocaCount = 0
+          , moduleConstraints = constraints
+          , funBlockPhis = phiMapFromFunction f
+          , withArchConstraints = id'
+          }
 
   -- Create ordinary blocks
   m0 <- gets llvmTransIntrinsicMap
   let initFunState :: FunState arch
-      initFunState = FunState { nmCounter = 0
-                              , funIntrinsicMap = m0
-                              , needSwitchFailLabel = False
-                              , funBlockPhiMap = initResolvePhiMap f
-                              }
+      initFunState =
+        FunState
+          { nmCounter = 0
+          , funIntrinsicMap = m0
+          , needSwitchFailLabel = False
+          , funBlockPhiMap = initResolvePhiMap f
+          }
   let (postEntryFunState, entryBlockRes) =
         addLLVMBlock ctx initFunState (fnEntryBlock f)
 
@@ -1792,10 +1883,14 @@ defineFunction archOps genOpts constraints f = do
         mapAccumL (addLLVMBlock ctx) postEntryFunState (fnRestBlocks f)
 
   -- Update intrins map and log events
-  modify' $ \s -> s {llvmTransIntrinsicMap = funIntrinsicMap finalFunState,
-                     llvmTransLogEvents = bbLLVMLogEvents (finalBBState entryBlockRes)
-                                          ++ concatMap (bbLLVMLogEvents . finalBBState) finalBlocks
-                                          ++ llvmTransLogEvents s}
+  modify' $ \s ->
+    s
+      { llvmTransIntrinsicMap = funIntrinsicMap finalFunState
+      , llvmTransLogEvents =
+          bbLLVMLogEvents (finalBBState entryBlockRes)
+            ++ concatMap (bbLLVMLogEvents . finalBBState) finalBlocks
+            ++ llvmTransLogEvents s
+      }
 
   let entryLLVMBlock :: L.BasicBlock
       entryLLVMBlock = toBasicBlock constraints (fnName f) (funBlockPhiMap finalFunState) entryBlockRes
@@ -1806,19 +1901,21 @@ defineFunction archOps genOpts constraints f = do
   let finBlocks
         | needSwitchFailLabel finalFunState = entryLLVMBlock : (blocks ++ [failBlock])
         | otherwise = entryLLVMBlock : blocks
-  let funDef = L.Define { L.defLinkage  = Nothing
-                        , L.defVisibility = Nothing
-                        , L.defRetType  = llvmFunctionReturnType (fnType f)
-                        , L.defName     = L.Symbol (BSC.unpack (fnName f))
-                        , L.defArgs     = inputArgs
-                        , L.defVarArgs  = False
-                        , L.defAttrs    = []
-                        , L.defSection  = Nothing
-                        , L.defGC       = Nothing
-                        , L.defBody     = finBlocks
-                        , L.defMetadata = Map.empty
-                        , L.defComdat   = Nothing
-                        }
+  let funDef =
+        L.Define
+          { L.defLinkage = Nothing
+          , L.defVisibility = Nothing
+          , L.defRetType = llvmFunctionReturnType (fnType f)
+          , L.defName = L.Symbol (BSC.unpack (fnName f))
+          , L.defArgs = inputArgs
+          , L.defVarArgs = False
+          , L.defAttrs = []
+          , L.defSection = Nothing
+          , L.defGC = Nothing
+          , L.defBody = finBlocks
+          , L.defMetadata = Map.empty
+          , L.defComdat = Nothing
+          }
   let funAnn :: Either String Ann.FunctionAnn
       funAnn = do
         blockAnnEntries <- mapM (getBlockAnn (fnName f)) (V.fromList (entryBlockRes : finalBlocks))
@@ -1828,11 +1925,13 @@ defineFunction archOps genOpts constraints f = do
               | otherwise =
                   blockAnnEntries
         let blockObjMap = uncurry Ann.blockAnnToJSON <$> finBlockAnnMap
-        let addr  = fromIntegral $ addrOffset $ segoffAddr $ fnAddr f
-        pure $! Ann.FunctionAnn { Ann.llvmFunName = BSC.unpack (fnName f)
-                                , Ann.faStartAddr = addr
-                                , Ann.blocks = blockObjMap
-                                }
+        let addr = fromIntegral $ addrOffset $ segoffAddr $ fnAddr f
+        pure $!
+          Ann.FunctionAnn
+            { Ann.llvmFunName = BSC.unpack (fnName f)
+            , Ann.faStartAddr = addr
+            , Ann.blocks = blockObjMap
+            }
   pure (funDef, funAnn)
 
 -- | Create function annotation from declaration.
@@ -1840,40 +1939,44 @@ mkExternalFunctionAnn ::
   FunctionDecl arch ->
   Ann.ExternalFunctionAnn
 mkExternalFunctionAnn d =
-  let -- Name of function as string
-      nm = BSC.unpack $ funDeclName d
-      -- Address of function
-      a = memWordValue $ addrOffset $ segoffAddr $ funDeclAddr d
-   in Ann.ExternalFunctionAnn
-        { Ann.efaLlvmFunName = nm,
-          Ann.efaStartAddr = fromIntegral a,
-          Ann.efaIsNoReturn = funDeclNoReturn d
-        }
+  let
+    -- Name of function as string
+    nm = BSC.unpack $ funDeclName d
+    -- Address of function
+    a = memWordValue $ addrOffset $ segoffAddr $ funDeclAddr d
+   in
+    Ann.ExternalFunctionAnn
+      { Ann.efaLlvmFunName = nm
+      , Ann.efaStartAddr = fromIntegral a
+      , Ann.efaIsNoReturn = funDeclNoReturn d
+      }
 
 ------------------------------------------------------------------------
 -- Other
 
 declareIntrinsic :: Intrinsic -> L.Declare
 declareIntrinsic i =
-  L.Declare { L.decLinkage = Nothing
-            , L.decVisibility = Nothing
-            , L.decRetType = intrinsicRes i
-            , L.decName    = intrinsicName i
-            , L.decArgs    = intrinsicArgs i
-            , L.decVarArgs = False
-            , L.decAttrs   = intrinsicAttrs i
-            , L.decComdat  = Nothing
-            }
+  L.Declare
+    { L.decLinkage = Nothing
+    , L.decVisibility = Nothing
+    , L.decRetType = intrinsicRes i
+    , L.decName = intrinsicName i
+    , L.decArgs = intrinsicArgs i
+    , L.decVarArgs = False
+    , L.decAttrs = intrinsicAttrs i
+    , L.decComdat = Nothing
+    }
 
 -- | Generate LLVM module from a list of functions describing the
 -- behavior.
 moduleForFunctions ::
-  forall arch .
-  ( LLVMArchConstraints arch,
-    Show (FunctionType arch),
-    FoldableFC (ArchFn arch),
-    FoldableF (FnArchStmt arch),
-    arch ~ X86_64) =>
+  forall arch.
+  ( LLVMArchConstraints arch
+  , Show (FunctionType arch)
+  , FoldableFC (ArchFn arch)
+  , FoldableF (FnArchStmt arch)
+  , arch ~ X86_64
+  ) =>
   -- | Architecture specific functions
   LLVMArchSpecificOps arch ->
   -- | Options for generating LLVM
@@ -1881,10 +1984,11 @@ moduleForFunctions ::
   -- | Module to generate
   RecoveredModule arch ->
   ModuleConstraints arch ->
-  (L.Module,
-   [(FunId, Either String Ann.FunctionAnn)],
-   [Ann.ExternalFunctionAnn],
-   [LLVMLogEvent])
+  ( L.Module
+  , [(FunId, Either String Ann.FunctionAnn)]
+  , [Ann.ExternalFunctionAnn]
+  , [LLVMLogEvent]
+  )
 moduleForFunctions archOps genOpts recMod constraints =
   let (dynIntrinsics, logEvents, definesAndAnn) = runLLVMTrans $
         forM (recoveredDefs recMod) $ \f -> do
@@ -1893,22 +1997,27 @@ moduleForFunctions archOps genOpts recMod constraints =
           pure (d, (fId, ma))
       -- FIXME: this is repeated in a bunch of places
       ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
-      namedTypes = [ L.TypeDecl (L.Ident s) (tyToLLVMType ptrWidth ty)
-                   | (s, ty) <- mcNamedTypes constraints ]
-      llvmMod =  L.Module { L.modSourceName = Nothing
-                          , L.modDataLayout = []
-                          , L.modTypes      = namedTypes
-                          , L.modNamedMd    = []
-                          , L.modUnnamedMd  = []
-                          , L.modGlobals    = []
-                          , L.modDeclares   = fmap declareIntrinsic llvmIntrinsics
-                                           ++ fmap declareIntrinsic dynIntrinsics
-                                           ++ fmap declareFunction (recoveredDecls recMod)
-                          , L.modDefines    = fst <$> definesAndAnn
-                          , L.modInlineAsm  = []
-                          , L.modAliases    = []
-                          , L.modComdat     = Map.empty
-                          }
+      namedTypes =
+        [ L.TypeDecl (L.Ident s) (tyToLLVMType ptrWidth ty)
+        | (s, ty) <- mcNamedTypes constraints
+        ]
+      llvmMod =
+        L.Module
+          { L.modSourceName = Nothing
+          , L.modDataLayout = []
+          , L.modTypes = namedTypes
+          , L.modNamedMd = []
+          , L.modUnnamedMd = []
+          , L.modGlobals = []
+          , L.modDeclares =
+              fmap declareIntrinsic llvmIntrinsics
+                ++ fmap declareIntrinsic dynIntrinsics
+                ++ fmap declareFunction (recoveredDecls recMod)
+          , L.modDefines = fst <$> definesAndAnn
+          , L.modInlineAsm = []
+          , L.modAliases = []
+          , L.modComdat = Map.empty
+          }
       annDecls = mkExternalFunctionAnn <$> recoveredDecls recMod
    in (llvmMod, snd <$> definesAndAnn, annDecls, logEvents)
 
@@ -1929,8 +2038,10 @@ getInferredType (FnArg arg _typ) = do
 getInferredFunctionArgType :: BSC.ByteString -> Int -> BBLLVM arch (Maybe FTy)
 getInferredFunctionArgType fn arg = do
   constraints <- asks moduleConstraints
-  let fnTypes = fromMaybe (error "fnTypes 1")
-        (Map.lookup fn (mcExtFunTypes constraints))
+  let fnTypes =
+        fromMaybe
+          (error "fnTypes 1")
+          (Map.lookup fn (mcExtFunTypes constraints))
   let argTyVar = fttvArgs fnTypes !! arg
   return (Map.lookup argTyVar (mcTypeMap constraints))
 
@@ -1947,12 +2058,12 @@ getInferredTypeForAssignId ::
   FnAssignId ->
   Maybe FTy
 getInferredTypeForAssignId constraints fn aId = do
-  let fnTypes = fromMaybe
-        (error ("Missing function key in mcAssignTyVars: " <> show fn))
-        (Map.lookup fn (mcAssignTyVars constraints))
+  let fnTypes =
+        fromMaybe
+          (error ("Missing function key in mcAssignTyVars: " <> show fn))
+          (Map.lookup fn (mcAssignTyVars constraints))
   valTyVar <- Map.lookup aId fnTypes
   Map.lookup valTyVar (mcTypeMap constraints)
-
 
 getKnownInferredType ::
   ModuleConstraints arch ->

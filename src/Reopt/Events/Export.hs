@@ -1,31 +1,49 @@
-{-|
-Operations for exporting relevant parts of events to JSON.
--}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE GADTs #-}
-
-module Reopt.Events.Export
-  ( exportEvent,
-    exportFatalError
-  ) where
+-- | Operations for exporting relevant parts of events to JSON.
+module Reopt.Events.Export (
+  exportEvent,
+  exportFatalError,
+) where
 
 import Control.Monad (forM_)
-import qualified Data.Aeson as Aeson
-import qualified Data.ByteString.Lazy as BSL
+import Data.Aeson qualified as Aeson
+import Data.ByteString.Lazy qualified as BSL
 import Data.Text (Text)
 import Data.Word (Word64)
 import GHC.Generics (Generic)
-import Reopt.Events
-import System.IO
+import Reopt.Events (
+  DiscoveryError (
+    discErrorBlockAddr,
+    discErrorBlockInsnIndex,
+    discErrorBlockSize,
+    discErrorMessage
+  ),
+  FunId (funIdAddr),
+  RecoverError (
+    recoverErrorBlock,
+    recoverErrorBlockSize,
+    recoverErrorInsnIndex,
+    recoverErrorMessage
+  ),
+  ReoptFatalError,
+  ReoptFunStep (
+    AnnotationGeneration,
+    Discovery,
+    InvariantInference,
+    Recovery
+  ),
+  ReoptLogEvent (..),
+  segoffWord64,
+ )
+import System.IO (Handle, hFlush, hPutChar)
 
 -- | Exported function address
 type ExportFunId = Word64
 
 data ExportEvent
-  -- | @CFGError f b sz idx msg@ indicates an error in a function at the given
-  -- function identifier @f@, block identifier @b@, block size @sz@, instruction
-  -- index @idx@ and message @msg@.
-  = CFGError !ExportFunId !Word64 !Int !Int !Text
+  = -- | @CFGError f b sz idx msg@ indicates an error in a function at the given
+    -- function identifier @f@, block identifier @b@, block size @sz@, instruction
+    -- index @idx@ and message @msg@.
+    CFGError !ExportFunId !Word64 !Int !Int !Text
   deriving (Generic)
 
 instance Aeson.ToJSON ExportEvent where

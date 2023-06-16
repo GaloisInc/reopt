@@ -18,13 +18,22 @@ common extensions
     FlexibleContexts
     FlexibleInstances
     FunctionalDependencies
+    GADTs
     GeneralizedNewtypeDeriving
     ImportQualifiedPost
+    LambdaCase
     MultiParamTypeClasses
     NamedFieldPuns
+    PatternGuards
+    PatternSynonyms
     RankNTypes
     ScopedTypeVariables
+    StandaloneDeriving
+    TupleSections
     TypeApplications
+    TypeFamilies
+    TypeOperators
+    ViewPatterns
 
 flag enable-hpc
   Description: Collect HPC coverage information.

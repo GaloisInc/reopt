@@ -1,23 +1,39 @@
-{-# LANGUAGE ScopedTypeVariables #-}
-
-module Reopt.FunUseMap
-  ( FunUseMap,
-    mkFunUseMap,
-    lookupFunSize,
-    totalFunUseSize,
-  )
+module Reopt.FunUseMap (
+  FunUseMap,
+  mkFunUseMap,
+  lookupFunSize,
+  totalFunUseSize,
+)
 where
 
 import Control.Lens ((^.))
-import Control.Monad.State
-import Data.Macaw.Discovery
-import Data.Macaw.Memory
+import Control.Monad.State (State, execState, modify)
+import Data.Macaw.Discovery (
+  ArchAddrWidth,
+  DiscoveryFunInfo (discoveredFunAddr),
+  DiscoveryState,
+  ParsedBlock (blockSize, pblockAddr, pblockTermStmt),
+  ParsedTermStmt (ParsedLookupTable),
+  funInfo,
+  jtlBackingAddr,
+  jtlBackingSize,
+  parsedBlocks,
+ )
+import Data.Macaw.Memory (
+  MemAddr (addrBase, addrOffset),
+  MemSegmentOff (..),
+  MemWidth,
+  MemWord (memWordValue),
+  RegionIndex,
+  segmentSize,
+  segoffAddr,
+ )
 import Data.Map (Map)
-import qualified Data.Map as Map
-import Data.Parameterized.Some ( Some(..) )
-import Data.Word ( Word64 )
+import Data.Map qualified as Map
+import Data.Parameterized.Some (Some (..))
+import Data.Word (Word64)
 import Numeric (showHex)
-import Reopt.Utils.Folds ( sumBy )
+import Reopt.Utils.Folds (sumBy)
 
 -- | Type synonym to identify segment offsets that should correspond
 -- to the start of a function.
@@ -51,11 +67,11 @@ replaceRegion ::
 replaceRegion off f newEnd oldFuns oldEnd m =
   case compare oldEnd newEnd of
     LT ->
-      Map.insert off (oldEnd, (f : oldFuns)) $
+      Map.insert off (oldEnd, f : oldFuns) $
         Map.insert oldEnd (newEnd, [f]) m
-    EQ -> Map.insert off (oldEnd, (f : oldFuns)) m
+    EQ -> Map.insert off (oldEnd, f : oldFuns) m
     GT ->
-      Map.insert off (newEnd, (f : oldFuns)) $
+      Map.insert off (newEnd, f : oldFuns) $
         Map.insert newEnd (oldEnd, oldFuns) m
 
 -- | Update funUseOffsetMap with new address
@@ -103,7 +119,7 @@ recordRegionUse f so sz (FunUseMap regionMap) = do
       off :: BlockOff
       off = memWordValue (addrOffset a)
       initMap = initFunUseOffsetMap f off (off + sz)
-      updMap _ old = updateFunUseOffsetMap f off (off + sz) old
+      updMap _ = updateFunUseOffsetMap f off (off + sz)
    in FunUseMap (Map.insertWith updMap (addrBase a) initMap regionMap)
 
 -- | Record memory used by block to function address

@@ -1,15 +1,5 @@
 {-# LANGUAGE CPP                        #-}
-{-# LANGUAGE DataKinds                  #-}
-{-# LANGUAGE FlexibleContexts           #-}
-{-# LANGUAGE GADTs                      #-}
-{-# LANGUAGE GeneralisedNewtypeDeriving #-}
-{-# LANGUAGE LambdaCase                 #-}
-{-# LANGUAGE NamedFieldPuns             #-}
 {-# LANGUAGE OverloadedStrings          #-}
-{-# LANGUAGE RankNTypes                 #-}
-{-# LANGUAGE ScopedTypeVariables        #-}
-{-# LANGUAGE TemplateHaskell            #-}
-{-# LANGUAGE TupleSections              #-}
 
 module Reopt
   ( -- * ReoptM Monad
@@ -324,8 +314,6 @@ data InitDiscovery arch = InitDiscovery
     initDiscoveryState   :: !(DiscoveryState arch)
   }
 
-$(pure [])
-
 ------------------------------------------------------------------------
 -- InitDiscoveryComp
 
@@ -498,8 +486,6 @@ reoptRunDiscovery symMap m = ReoptM $
   ReaderT $ \logger -> ContT $ \c -> do
     processIncCompLogs (logDiscEventAsReoptEvents logger symMap) (runIncCompM m) >>= c
 
-$(pure [])
-
 ------------------------------------------------------------------------
 -- Utilities
 
@@ -596,8 +582,6 @@ processX86PLTEntries hdrInfo shdrs = do
     Right m ->
       pure m
 
-$(pure [])
-
 ------------------------------------------------------------------------
 --X86 calling convention
 
@@ -691,9 +675,6 @@ getElfArchInfo cl arch abi =
             (Elf.elfClassBitWidth cl)
             archName
             (show abi)
-
-$(pure [])
-
 
 ------------------------------------------------------------------------
 -- Explore a control flow graph.
@@ -815,8 +796,6 @@ ignorePLTEntries :: ProcessPLTEntries w
 ignorePLTEntries _ _ _ _ _ _ _ = pure ()
 #endif
 
-$(pure [])
-
 reportSymbolResError :: SymbolResolutionError -> State [SymbolResolutionError] ()
 reportSymbolResError e = seq e $ modify (e :)
 
@@ -872,8 +851,6 @@ resolveObjSymbol hdrInfo mem secMap sam (idx, ste) = elfInstances hdrInfo $ do
                           reportSymbolResError $ CouldNotResolveAddr (Elf.steName ste)
                           pure sam
 
-$(pure [])
-
 initDiscState ::
   -- | Initial memory
   Memory (ArchAddrWidth arch) ->
@@ -924,8 +901,6 @@ initDiscState mem initPoints regInfo symAddrMap explorePred ainfo reoptOpts = do
       pure $! initState
     _ -> do
       throwError "Cannot both include and exclude specific addresses."
-
-$(pure [])
 
 -- | Identify symbol names
 discoverSymbolNames ::
@@ -1283,9 +1258,6 @@ doInit loadOpts hdrInfo ainfo pltFn reoptOpts = elfInstances hdrInfo $ do
     tp -> do
       initError $ "Elf files with type " ++ show tp ++ " unsupported."
 
-$(pure [])
-
-
 ---------------------------------------------------------------------------------
 -- Dynamic Dependency Handling
 
@@ -1561,9 +1533,6 @@ findDynamicDependencyDebugInfo hdrInfo rDisOpt = do
       pure Map.empty
     Right dynDeps ->
       foldlM (addDynDepDebugInfo rDisOpt) Map.empty dynDeps
-
-
-$(pure [])
 
 ---------------------------------------------------------------------------------
 -- Logging
@@ -2066,8 +2035,6 @@ recoveredFunctionName m prefix segOff =
     Just qname -> localFunctionName prefix segOff qname
     Nothing    -> nosymFunctionName prefix segOff
 
-$(pure [])
-
 -- | Construct function type from demands.
 inferFunctionTypeFromDemands ::
   Map (MemSegmentOff 64) (DemandSet X86Reg) ->
@@ -2110,8 +2077,6 @@ inferFunctionTypeFromDemands dm =
           dm
           retDemands
 
-$(pure [])
-
 resolveReoptFunType ::
   Monad m =>
   ReoptFunType ->
@@ -2122,8 +2087,6 @@ resolveReoptFunType (ReoptPrintfFunType i) =
   pure $! X86PrintfFunType i
 resolveReoptFunType ReoptOpenFunType =
   pure X86OpenFunType
-
-$(pure [])
 
 --------------------------------------------------------------------------------
 -- recoverX86Elf
@@ -2475,8 +2438,6 @@ recoverX86Elf loadOpts reoptOpts hdrAnn unnamedFunPrefix hdrInfo = do
 
   pure (os, discState, recoverX86Output, constraints)
 
-$(pure [])
-
 --------------------------------------------------------------------------------
 -- Compile the LLVM
 
@@ -2491,7 +2452,7 @@ optimizeLLVM ::
 optimizeLLVM 0 _ llvmBldr = do
   pure $ BSL.toStrict $ Builder.toLazyByteString llvmBldr
 optimizeLLVM optLevel optPath llvmBldr = do
-  Ext.run_opt optPath optLevel $ \inHandle -> do
+  Ext.runOpt optPath optLevel $ \inHandle -> do
     Builder.hPutBuilder inHandle llvmBldr
 
 -- | Compile a bytestring containing LLVM assembly or bitcode into an object.

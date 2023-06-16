@@ -1,26 +1,15 @@
-{-|
-Defines the X86-specific definitions needed in the function representation.
--}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE TypeFamilies #-}
-module Reopt.CFG.FnRep.X86
-  ( -- * X86 specific
-   X86FnStmt(..)
-  ) where
+-- | Defines the X86-specific definitions needed in the function representation.
+module Reopt.CFG.FnRep.X86 (
+  X86FnStmt (..),
+) where
 
+import Data.Macaw.CFG (IsArchStmt (..))
+import Data.Macaw.X86.ArchTypes (X86Stmt, X86_64)
+import Data.Parameterized.TraversableF (FoldableF (foldrF))
 
-import Data.Macaw.CFG (IsArchStmt(..))
-import Data.Macaw.X86.ArchTypes (X86_64, X86Stmt)
-import Data.Parameterized.TraversableF
+import Reopt.CFG.FnRep (FnArchStmt)
 
-import Reopt.CFG.FnRep
-
-------------------------------------------------------------------------
--- X86ArchStmt
-
-data X86FnStmt f = X86FnStmt (X86Stmt f)
+newtype X86FnStmt f = X86FnStmt (X86Stmt f)
 
 type instance FnArchStmt X86_64 = X86FnStmt
 

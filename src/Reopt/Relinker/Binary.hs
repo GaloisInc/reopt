@@ -1,45 +1,42 @@
-{-|
-This module contains functions for inferring information from binary.
--}
-{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes #-}
-module Reopt.Relinker.Binary
-  ( ElfContentLayout
-  , ElfRegion(..)
-  , eclCodePhdrIndex
-  , eclRodataPhdrIndex
-  , eclFileRegions
-  , eclCodeRegions
-  , SpecialRegion(..)
-  , OffsetConstraint(..)
-  , inferNextOff
-  , FileSource(..)
-  , FileOffsetMap
-  , inferBinaryLayout
-  , Reopt.Relinker.Constants.infoIsShdrIndex
-  ) where
 
-import           Control.Monad (when, unless, forM_)
-import           Control.Monad.Except ( ExceptT, runExceptT, throwError )
-import           Control.Monad.Reader ( Reader, asks, runReader )
-import           Control.Monad.State.Strict ( StateT, runStateT, gets, modify )
-import           Data.Bits
-import qualified Data.ByteString as BS
-import qualified Data.ElfEdit as Elf
-import qualified Data.Map as Map
-import           Data.Maybe ( isJust )
-import qualified Data.Vector as V
-import           Data.Word ( Word16, Word64 )
-import           Numeric (showHex)
-import           Text.Printf ( printf )
+-- | This module contains functions for inferring information from binary.
+module Reopt.Relinker.Binary (
+  ElfContentLayout,
+  ElfRegion (..),
+  eclCodePhdrIndex,
+  eclRodataPhdrIndex,
+  eclFileRegions,
+  eclCodeRegions,
+  SpecialRegion (..),
+  OffsetConstraint (..),
+  inferNextOff,
+  FileSource (..),
+  FileOffsetMap,
+  inferBinaryLayout,
+  Reopt.Relinker.Constants.infoIsShdrIndex,
+) where
 
-import           Reopt.Relinker.Constants
-import           Reopt.Utils.Flags (hasFlags)
+import Control.Monad (forM_, unless, when)
+import Control.Monad.Except (ExceptT, runExceptT, throwError)
+import Control.Monad.Reader (Reader, asks, runReader)
+import Control.Monad.State.Strict (StateT, gets, modify, runStateT)
+import Data.Bits (Bits ((.&.), (.|.)))
+import Data.ByteString qualified as BS
+import Data.ElfEdit qualified as Elf
+import Data.Map qualified as Map
+import Data.Maybe (isJust)
+import Data.Vector qualified as V
+import Data.Word (Word16, Word64)
+import Numeric (showHex)
+import Text.Printf (printf)
+
+import Reopt.Relinker.Constants (infoIsShdrIndex, pageSize)
+import Reopt.Utils.Flags (hasFlags)
 
 -- | @enumCnt b c@ returns a list with @c@ enum values starting from @b@.
 enumCnt :: (Enum e, Real r) => e -> r -> [e]
-enumCnt e x = if x > 0 then e : enumCnt (succ e) (x-1) else []
+enumCnt e x = if x > 0 then e : enumCnt (succ e) (x - 1) else []
 
 hasSegmentType :: Elf.Phdr w -> Elf.PhdrType -> Bool
 hasSegmentType p tp = Elf.phdrSegmentType p == tp
@@ -49,37 +46,37 @@ hasSegmentType p tp = Elf.phdrSegmentType p == tp
 
 -- | Special region
 data SpecialRegion
-   = Ehdr
-   | PhdrTable
-   | ShdrTable
-   | Interpreter
-   | Shstrtab
-   | Strtab
-   | Symtab
- deriving (Eq, Ord, Show)
+  = Ehdr
+  | PhdrTable
+  | ShdrTable
+  | Interpreter
+  | Shstrtab
+  | Strtab
+  | Symtab
+  deriving (Eq, Ord, Show)
 
 -----------------------------------------------------------------------
 -- OffsetConstraint
 
 -- | A constraint on file offsets (used for padding).
 data OffsetConstraint
-     -- | @LoadSegmentConstraint a@ indicates if a file offset
-     -- @off@ should be aligned within a page to @a@.
-     --
-     -- i.e., @off mod pageSize = a@.
-   = LoadSegmentConstraint !Int
-     -- | @FileOffsetMultiple n@ indicates file offset should be a multiple of @n@.
-   | FileOffsetMultiple !Int
-
+  = -- | @LoadSegmentConstraint a@ indicates if a file offset
+    -- @off@ should be aligned within a page to @a@.
+    --
+    -- i.e., @off mod pageSize = a@.
+    LoadSegmentConstraint !Int
+  | -- | @FileOffsetMultiple n@ indicates file offset should be a multiple of @n@.
+    FileOffsetMultiple !Int
   deriving (Eq, Show)
 
 mkFileOffset :: Int -> OffsetConstraint
-mkFileOffset i | i < 0 = error "Illegal offset"
-               | i == 0 =  FileOffsetMultiple 1
-               | otherwise = FileOffsetMultiple i
+mkFileOffset i
+  | i < 0 = error "Illegal offset"
+  | i == 0 = FileOffsetMultiple 1
+  | otherwise = FileOffsetMultiple i
 
 unconstrained :: OffsetConstraint
-unconstrained =  FileOffsetMultiple 1
+unconstrained = FileOffsetMultiple 1
 
 isUnconstrained :: OffsetConstraint -> Bool
 isUnconstrained (FileOffsetMultiple o) = o `elem` [0, 1]
@@ -88,12 +85,12 @@ isUnconstrained (LoadSegmentConstraint _) = False
 -- @checkSubsumption prev new@ checks that prev subsumes new.
 checkSubsumption :: Int -> OffsetConstraint -> Int -> OffsetConstraint -> Maybe OffsetConstraint
 checkSubsumption po (LoadSegmentConstraint p) oo (LoadSegmentConstraint o)
-  | po == oo, p == o  = Just (LoadSegmentConstraint p)
+  | po == oo, p == o = Just (LoadSegmentConstraint p)
   | otherwise = Nothing
 checkSubsumption po (LoadSegmentConstraint p) oo (FileOffsetMultiple o)
   | o < pageSize, ((oo - po + p) `mod` pageSize) `rem` fromIntegral o == 0 = Just (LoadSegmentConstraint p)
   | otherwise = Nothing
-checkSubsumption po ( FileOffsetMultiple p) oo (LoadSegmentConstraint o)
+checkSubsumption po (FileOffsetMultiple p) oo (LoadSegmentConstraint o)
   | po == oo, o `rem` fromIntegral p == 0 = Just (LoadSegmentConstraint o)
   | otherwise = Nothing
 checkSubsumption po l@(FileOffsetMultiple p) oo r@(FileOffsetMultiple o)
@@ -102,25 +99,26 @@ checkSubsumption po l@(FileOffsetMultiple p) oo r@(FileOffsetMultiple o)
   | otherwise = Nothing
 
 nextMultiple :: Int -> Int -> Int
-nextMultiple off n = n * ((off + (n-1)) `div` n)
+nextMultiple off n = n * ((off + (n - 1)) `div` n)
 
 -- | Compute next offset given alignment constraint.
 inferNextOff :: Int -> OffsetConstraint -> Int
 inferNextOff off (FileOffsetMultiple n) = nextMultiple off n
 inferNextOff off (LoadSegmentConstraint addr) = off + diff
-  where mask = pageSize - 1
-        diff = (pageSize + (addr .&. mask) - (off .&. mask)) .&. mask
-
+ where
+  mask = pageSize - 1
+  diff = (pageSize + (addr .&. mask) - (off .&. mask)) .&. mask
 
 -----------------------------------------------------------------------
 -- FileSource
 
 data FileSource
-   = SrcSpecialRegion !SpecialRegion
-   | Data -- ^ Data copied from original binary.
-   | Code !Word64 -- ^ Code region with address.
- deriving (Eq)
-
+  = SrcSpecialRegion !SpecialRegion
+  | -- | Data copied from original binary.
+    Data
+  | -- | Code region with address.
+    Code !Word64
+  deriving (Eq)
 
 instance Show FileSource where
   show (Code _) = "Code"
@@ -132,25 +130,25 @@ instance Show FileSource where
 
 -- | Elf file content layout information used for generating
 -- content.
-data ElfContentLayout w =
-  ECL { eclHeader :: !(Elf.ElfHeaderInfo w)
-      , eclSpecialRegionInLoad :: !(Map.Map SpecialRegion Bool)
-        -- ^ Map from special region to load
-      , eclFileOffsetMap :: !(Map.Map Int (Int, OffsetConstraint, FileSource))
-        -- ^ Map from region file offsets to size, constraints on offsets and source.
-      , eclCodePhdrIndex :: !Word16
-        -- ^ Index of program header.
-      , eclRodataPhdrIndex :: !(Maybe Word16)
-        -- ^ Index of program header to extend for rodata (or `Nothing` if code phdr should be used).
-      }
+data ElfContentLayout w = ECL
+  { eclHeader :: !(Elf.ElfHeaderInfo w)
+  , eclSpecialRegionInLoad :: !(Map.Map SpecialRegion Bool)
+  -- ^ Map from special region to load
+  , eclFileOffsetMap :: !(Map.Map Int (Int, OffsetConstraint, FileSource))
+  -- ^ Map from region file offsets to size, constraints on offsets and source.
+  , eclCodePhdrIndex :: !Word16
+  -- ^ Index of program header.
+  , eclRodataPhdrIndex :: !(Maybe Word16)
+  -- ^ Index of program header to extend for rodata (or `Nothing` if code phdr should be used).
+  }
 
 -- | A region of the binary
-data ElfRegion = ElfRegion { eregOff  :: !Int
-                           , eregSize :: !Int
-                           , eregCns  :: !OffsetConstraint
-                           , eregSrc  :: !FileSource
-                           }
-
+data ElfRegion = ElfRegion
+  { eregOff :: !Int
+  , eregSize :: !Int
+  , eregCns :: !OffsetConstraint
+  , eregSrc :: !FileSource
+  }
 
 mkElfRegion :: (Int, (Int, OffsetConstraint, FileSource)) -> ElfRegion
 mkElfRegion (off, (sz, cns, src)) = ElfRegion off sz cns src
@@ -161,32 +159,34 @@ eclFileRegions l = mkElfRegion <$> Map.toList (eclFileOffsetMap l)
 -- | Return code regions associated with Elf content.
 eclCodeRegions :: Integral (Elf.ElfWordType w) => ElfContentLayout w -> [ElfRegion]
 eclCodeRegions l = mkElfRegion <$> Map.toList m
-  where codePhdr = Elf.phdrByIndex (eclHeader l) (eclCodePhdrIndex l)
-        codeOff :: Int
-        codeOff = fromIntegral (Elf.phdrFileStart codePhdr)
-        codeEnd :: Int
-        codeEnd = codeOff + fromIntegral (Elf.phdrFileSize codePhdr)
-        m = Map.takeWhileAntitone (< codeEnd)
-          $ Map.dropWhileAntitone (< codeOff)
-          $ eclFileOffsetMap l
+ where
+  codePhdr = Elf.phdrByIndex (eclHeader l) (eclCodePhdrIndex l)
+  codeOff :: Int
+  codeOff = fromIntegral (Elf.phdrFileStart codePhdr)
+  codeEnd :: Int
+  codeEnd = codeOff + fromIntegral (Elf.phdrFileSize codePhdr)
+  m =
+    Map.takeWhileAntitone (< codeEnd) $
+      Map.dropWhileAntitone (< codeOff) $
+        eclFileOffsetMap l
 
 -----------------------------------------------------------------------
 -- Functions for inferring ElfContentLayout
 
-data InferMContext w = IMC { imcElf :: !(Elf.ElfHeaderInfo w) }
+newtype InferMContext w = IMC {imcElf :: Elf.ElfHeaderInfo w}
 
 type FileOffsetMap = Map.Map Int (Int, OffsetConstraint, FileSource)
 
-
-data InferMState = IMS { imsInLoad :: !(Map.Map Int Int)
-                       , imsFileOffsetMap :: !FileOffsetMap
-                       , imsCodePhdrIndex :: !(Maybe Word16)
-                         -- ^ Index of program header for code
-                       , imsRodataPhdrIndex :: !(Maybe Word16)
-                         -- ^ Index of program header for readonly data.
-                       , imsSpecialRegionOff :: !(Map.Map SpecialRegion (Int, Int))
-                         -- ^ Map from special regions to their offset and size in file.
-                       }
+data InferMState = IMS
+  { imsInLoad :: !(Map.Map Int Int)
+  , imsFileOffsetMap :: !FileOffsetMap
+  , imsCodePhdrIndex :: !(Maybe Word16)
+  -- ^ Index of program header for code
+  , imsRodataPhdrIndex :: !(Maybe Word16)
+  -- ^ Index of program header for readonly data.
+  , imsSpecialRegionOff :: !(Map.Map SpecialRegion (Int, Int))
+  -- ^ Map from special regions to their offset and size in file.
+  }
 
 type InferM w = ExceptT String (StateT InferMState (Reader (InferMContext w)))
 
@@ -199,11 +199,11 @@ deleteFileOffsetMapEntry :: String -> Int -> OffsetConstraint -> InferM w ()
 deleteFileOffsetMapEntry nm e cns = do
   when (isUnconstrained cns) $ do
     throwError $ nm ++ " overwrites previous constraint."
-  modify $ \s -> s { imsFileOffsetMap = Map.delete e (imsFileOffsetMap s) }
+  modify $ \s -> s{imsFileOffsetMap = Map.delete e (imsFileOffsetMap s)}
 
 setFileOffsetMapEntry :: Int -> Int -> OffsetConstraint -> FileSource -> InferM w ()
 setFileOffsetMapEntry o sz cns src =
-  modify $ \s -> s { imsFileOffsetMap = Map.insert o (sz, cns, src) (imsFileOffsetMap s) }
+  modify $ \s -> s{imsFileOffsetMap = Map.insert o (sz, cns, src) (imsFileOffsetMap s)}
 
 -- | Mark offset of special region
 setSpecialRegionOff :: String -> SpecialRegion -> Int -> Int -> InferM w ()
@@ -212,7 +212,7 @@ setSpecialRegionOff nm reg off sz = do
   case mIdx of
     Nothing -> pure ()
     Just _ -> throwError $ nm ++ " already found."
-  modify $ \s -> s { imsSpecialRegionOff = Map.insert reg (off, sz) (imsSpecialRegionOff s) }
+  modify $ \s -> s{imsSpecialRegionOff = Map.insert reg (off, sz) (imsSpecialRegionOff s)}
 
 -- | Mark a region of a file as loaded (and thus changes need to be carefully done)
 markLoadRegion :: Int -> Int -> InferM w ()
@@ -221,29 +221,30 @@ markLoadRegion off0 sz0 = do
         case Map.lookupLE e m of
           Just (prevOff, prevSize) | prevOff + prevSize >= s -> do
             go (min prevOff s) (max e (prevOff + prevSize)) (Map.delete prevOff m)
-          _ -> Map.insert s (e-s) m
-  modify $ \s -> s { imsInLoad = go off0 (off0+sz0) (imsInLoad s) }
+          _ -> Map.insert s (e - s) m
+  modify $ \s -> s{imsInLoad = go off0 (off0 + sz0) (imsInLoad s)}
 
 insertAtomic :: String -> Int -> Int -> Int -> SpecialRegion -> InferM w ()
-insertAtomic nm off sz fileCns src =  withElfClassInstances $ do
-  m <- gets $ Map.lookupLT (off+sz) . imsFileOffsetMap
+insertAtomic nm off sz fileCns src = withElfClassInstances $ do
+  m <- gets $ Map.lookupLT (off + sz) . imsFileOffsetMap
   case m of
     Just (prevOff, (prevSize, cns, Data))
       | prevEnd <- prevOff + prevSize
       , prevEnd > off -> do
-      when (prevEnd > off+sz) $ do
-        setFileOffsetMapEntry (off+sz) (prevEnd - (off+sz)) unconstrained Data
-      if prevOff < off then do
-        setFileOffsetMapEntry  prevOff (off-prevOff) cns Data
-        setFileOffsetMapEntry off sz (mkFileOffset fileCns) (SrcSpecialRegion src)
-        setSpecialRegionOff nm src off sz
-       else do
-        deleteFileOffsetMapEntry nm prevOff cns
-        insertAtomic nm off sz fileCns src
+          when (prevEnd > off + sz) $ do
+            setFileOffsetMapEntry (off + sz) (prevEnd - (off + sz)) unconstrained Data
+          if prevOff < off
+            then do
+              setFileOffsetMapEntry prevOff (off - prevOff) cns Data
+              setFileOffsetMapEntry off sz (mkFileOffset fileCns) (SrcSpecialRegion src)
+              setSpecialRegionOff nm src off sz
+            else do
+              deleteFileOffsetMapEntry nm prevOff cns
+              insertAtomic nm off sz fileCns src
     Just (prevOff, (prevSize, _, prevSrc))
       | prevEnd <- prevOff + prevSize
       , prevEnd > off -> do
-      throwError $ printf "%s overlaps with previous %s segment." nm (show prevSrc)
+          throwError $ printf "%s overlaps with previous %s segment." nm (show prevSrc)
     _ -> do
       setFileOffsetMapEntry off sz (mkFileOffset fileCns) (SrcSpecialRegion src)
       setSpecialRegionOff nm src off sz
@@ -260,30 +261,42 @@ insertAtomicSegment idx phdr fileCns src = withElfClassInstances $ do
 -- earlier segment.
 insertDataSegment2 :: Int -> Int -> OffsetConstraint -> InferM w ()
 insertDataSegment2 off sz cns = do
-  m <- gets $ Map.lookupLT (off+sz) . imsFileOffsetMap
+  m <- gets $ Map.lookupLT (off + sz) . imsFileOffsetMap
   case m of
-    Just (prevOff, (prevSize, prevCns, src)) | prevEnd <- prevOff + prevSize, prevEnd > off -> do
-      if prevOff <= off then
-        if Data == src then do
-          let newEnd = max prevEnd (off+sz)
-          let newSize = newEnd - prevOff
-          setFileOffsetMapEntry prevOff newSize prevCns Data
-         else do
-          case checkSubsumption prevOff prevCns off cns of
-            Just newCns -> do
-              when (newCns /= prevCns) $ do
-                setFileOffsetMapEntry prevOff prevSize cns src
-            Nothing -> do
-              throwError $ printf "Segment 0x%s with source %s constraint %s subsumption check fails by previous 0x%s %s."
-                (showHex off "") (show src) (show cns) (showHex prevOff "") (show prevCns)
-          when (off+sz > prevEnd) $ do
-            setFileOffsetMapEntry prevEnd (off+sz - prevEnd) unconstrained Data
-       else --prevOff > off
-        if Data == src then do
-          setFileOffsetMapEntry prevOff (off-prevOff) prevCns Data
-          insertDataSegment2 off (max (prevEnd - off) sz) cns
-         else do
-          insertDataSegment2 off (prevOff - off) cns
+    Just (prevOff, (prevSize, prevCns, src))
+      | prevEnd <- prevOff + prevSize
+      , prevEnd > off -> do
+          if prevOff <= off
+            then
+              if Data == src
+                then do
+                  let newEnd = max prevEnd (off + sz)
+                  let newSize = newEnd - prevOff
+                  setFileOffsetMapEntry prevOff newSize prevCns Data
+                else do
+                  case checkSubsumption prevOff prevCns off cns of
+                    Just newCns -> do
+                      when (newCns /= prevCns) $ do
+                        setFileOffsetMapEntry prevOff prevSize cns src
+                    Nothing -> do
+                      throwError $
+                        printf
+                          "Segment 0x%s with source %s constraint %s subsumption check fails by previous 0x%s %s."
+                          (showHex off "")
+                          (show src)
+                          (show cns)
+                          (showHex prevOff "")
+                          (show prevCns)
+                  when (off + sz > prevEnd) $ do
+                    setFileOffsetMapEntry prevEnd (off + sz - prevEnd) unconstrained Data
+            else -- prevOff > off
+
+              if Data == src
+                then do
+                  setFileOffsetMapEntry prevOff (off - prevOff) prevCns Data
+                  insertDataSegment2 off (max (prevEnd - off) sz) cns
+                else do
+                  insertDataSegment2 off (prevOff - off) cns
     _ -> setFileOffsetMapEntry off sz cns Data
 
 insertDataSegment :: Int -> Int -> OffsetConstraint -> InferM w ()
@@ -292,47 +305,47 @@ insertDataSegment off sz cns =
     insertDataSegment2 off sz cns
 
 -- | Infer layout for program header.
-checkPhdr :: Word16 -- ^ Index of program header.
-          -> Elf.Phdr w
-          -> InferM w ()
+checkPhdr ::
+  -- | Index of program header.
+  Word16 ->
+  Elf.Phdr w ->
+  InferM w ()
 checkPhdr idx phdr
   | hasSegmentType phdr Elf.PT_PHDR = withElfClassInstances $ do
-    hdrInfo <- asks imcElf
-    let a = fromIntegral (Elf.phdrSegmentAlign phdr)
-    when (Elf.phdrFileStart phdr /= Elf.phdrTableFileOffset hdrInfo) $ do
-      throwError $ "Mismatch in program header table location."
+      hdrInfo <- asks imcElf
+      let a = fromIntegral (Elf.phdrSegmentAlign phdr)
+      when (Elf.phdrFileStart phdr /= Elf.phdrTableFileOffset hdrInfo) $ do
+        throwError "Mismatch in program header table location."
 
-    insertAtomicSegment idx phdr a PhdrTable
+      insertAtomicSegment idx phdr a PhdrTable
   | hasSegmentType phdr Elf.PT_INTERP = withElfClassInstances $ do
-    let a = fromIntegral (Elf.phdrSegmentAlign phdr)
-    insertAtomicSegment idx phdr a Interpreter
-
+      let a = fromIntegral (Elf.phdrSegmentAlign phdr)
+      insertAtomicSegment idx phdr a Interpreter
   | hasSegmentType phdr Elf.PT_LOAD = withElfClassInstances $ do
+      let off = fromIntegral (Elf.phdrFileStart phdr)
+      let sz = fromIntegral (Elf.phdrFileSize phdr)
+      -- Mark load region
+      markLoadRegion off sz
 
-    let off = fromIntegral (Elf.phdrFileStart phdr)
-    let sz = fromIntegral (Elf.phdrFileSize phdr)
-    -- Mark load region
-    markLoadRegion off sz
+      -- Record index of code segment.
+      let isCodeSegment = Elf.phdrSegmentFlags phdr `hasFlags` (Elf.pf_r .|. Elf.pf_x)
+      when isCodeSegment $ do
+        cr <- gets imsCodePhdrIndex
+        when (isJust cr) $ do
+          throwError "Code region already defined."
+        when (Elf.phdrMemSize phdr /= Elf.phdrFileSize phdr) $ do
+          throwError "Code segment memory and file size must match."
+        modify $ \s -> s{imsCodePhdrIndex = Just idx}
 
-    -- Record index of code segment.
-    let isCodeSegment = Elf.phdrSegmentFlags phdr `hasFlags` (Elf.pf_r .|. Elf.pf_x)
-    when isCodeSegment $ do
-      cr <- gets imsCodePhdrIndex
-      when (isJust cr) $ do
-        throwError $ "Code region already defined."
-      when (Elf.phdrMemSize phdr /= Elf.phdrFileSize phdr) $ do
-        throwError $ "Code segment memory and file size must match."
-      modify $ \s -> s { imsCodePhdrIndex = Just idx }
+      -- Record index of last data segment.
+      let isRodataSegment =
+            Elf.phdrSegmentFlags phdr == Elf.pf_r
+              && Elf.phdrMemSize phdr == Elf.phdrFileSize phdr
+      when isRodataSegment $ do
+        modify $ \s -> s{imsRodataPhdrIndex = Just idx}
 
-    -- Record index of last data segment.
-    let isRodataSegment = Elf.phdrSegmentFlags phdr == Elf.pf_r
-                       && Elf.phdrMemSize phdr == Elf.phdrFileSize phdr
-    when isRodataSegment $ do
-      modify $ \s -> s { imsRodataPhdrIndex = Just idx }
-
-    let cns = LoadSegmentConstraint (fromIntegral (Elf.phdrSegmentVirtAddr phdr) .&. 0xfff)
-    insertDataSegment off sz cns
-
+      let cns = LoadSegmentConstraint (fromIntegral (Elf.phdrSegmentVirtAddr phdr) .&. 0xfff)
+      insertDataSegment off sz cns
   | otherwise = withElfClassInstances $ do
       let off :: Int
           off = fromIntegral (Elf.phdrFileStart phdr)
@@ -341,8 +354,9 @@ checkPhdr idx phdr
       let a = fromIntegral (Elf.phdrSegmentAlign phdr)
       insertDataSegment off sz (mkFileOffset a)
 
-checkShdr :: Elf.Shdr BS.ByteString (Elf.ElfWordType w)
-          -> InferM w ()
+checkShdr ::
+  Elf.Shdr BS.ByteString (Elf.ElfWordType w) ->
+  InferM w ()
 checkShdr shdr = withElfClassInstances $ do
   let off = fromIntegral (Elf.shdrOff shdr)
   let sz = fromIntegral (Elf.shdrFileSize shdr)
@@ -360,10 +374,10 @@ checkShdr shdr = withElfClassInstances $ do
 -- | Create map
 mkSpecialRegionMap :: InferMState -> Either String (Map.Map SpecialRegion Bool)
 mkSpecialRegionMap s = do
-  let resolve _reg (o,sz) =
-        case Map.lookupLT (o+sz) (imsInLoad s) of
+  let resolve _reg (o, sz) =
+        case Map.lookupLT (o + sz) (imsInLoad s) of
           Just (prevOff, prevSize) | prevOff + prevSize > o -> do
-            unless (prevOff <= o && o+sz <= prevOff + prevSize) $ do
+            unless (prevOff <= o && o + sz <= prevOff + prevSize) $ do
               Left $ printf "Special region %s crosses load boundary."
             Right True
           _ ->
@@ -375,45 +389,53 @@ mkSpecialRegionMap s = do
 --
 -- This assumes that the code region has already been defined as Data, and
 -- it will replace all regions with Data `FileSource` values with `Code`.
-updateCodeConstraints :: Word64 -- ^ Starting address
-                      -> Int -- ^ Starting file offset
-                      -> Int -- ^ Number of bytes
-                      -> FileOffsetMap
-                      -> FileOffsetMap
-updateCodeConstraints base off sz = go (off+sz)
-  where go :: Int -> FileOffsetMap -> FileOffsetMap
-        go e m
-          | e <= off = m
-          | otherwise =
-            case Map.lookupLT e m of
-              Nothing -> error $ "Missing data region for code segment."
-              Just (regOff, (regSize, cns, src)) ->
-                case src of
-                  Code _ -> error $ "Unexpected code segment when inserting one."
-                  SrcSpecialRegion _ -> go regOff m
-                  Data
-                    | regOff < off -> error $ "Skipped over first data segment."
-                    | otherwise ->
-                      let addr = base + fromIntegral (regOff - off)
-                       in go regOff (Map.insert regOff (regSize, cns, Code addr) m)
+updateCodeConstraints ::
+  -- | Starting address
+  Word64 ->
+  -- | Starting file offset
+  Int ->
+  -- | Number of bytes
+  Int ->
+  FileOffsetMap ->
+  FileOffsetMap
+updateCodeConstraints base off sz = go (off + sz)
+ where
+  go :: Int -> FileOffsetMap -> FileOffsetMap
+  go e m
+    | e <= off = m
+    | otherwise =
+        case Map.lookupLT e m of
+          Nothing -> error "Missing data region for code segment."
+          Just (regOff, (regSize, cns, src)) ->
+            case src of
+              Code _ -> error "Unexpected code segment when inserting one."
+              SrcSpecialRegion _ -> go regOff m
+              Data
+                | regOff < off -> error "Skipped over first data segment."
+                | otherwise ->
+                    let addr = base + fromIntegral (regOff - off)
+                     in go regOff (Map.insert regOff (regSize, cns, Code addr) m)
 
 -- | Infer layout from binary.
-inferBinaryLayout :: Elf.ElfHeaderInfo w
-                  -> V.Vector (Elf.Shdr BS.ByteString (Elf.ElfWordType w))
-                     -- ^ Section headers from binary
-                  -> Either String (ElfContentLayout w)
+inferBinaryLayout ::
+  Elf.ElfHeaderInfo w ->
+  -- | Section headers from binary
+  V.Vector (Elf.Shdr BS.ByteString (Elf.ElfWordType w)) ->
+  Either String (ElfContentLayout w)
 inferBinaryLayout elfHdr shdrs = do
   let hdr = Elf.header elfHdr
   let cl = Elf.headerClass hdr
   Elf.elfClassInstances cl $ do
-    let ctx = IMC { imcElf = elfHdr }
+    let ctx = IMC{imcElf = elfHdr}
     let esize = fromIntegral (Elf.ehdrSize cl)
-    let s0 = IMS { imsInLoad = Map.empty
-                 , imsFileOffsetMap = Map.singleton 0 (esize, unconstrained, SrcSpecialRegion Ehdr)
-                 , imsCodePhdrIndex = Nothing
-                 , imsRodataPhdrIndex = Nothing
-                 , imsSpecialRegionOff = Map.singleton Ehdr (0, esize)
-                 }
+    let s0 =
+          IMS
+            { imsInLoad = Map.empty
+            , imsFileOffsetMap = Map.singleton 0 (esize, unconstrained, SrcSpecialRegion Ehdr)
+            , imsCodePhdrIndex = Nothing
+            , imsRodataPhdrIndex = Nothing
+            , imsSpecialRegionOff = Map.singleton Ehdr (0, esize)
+            }
     let act = do
           -- Insert section header table if defined.
           when (Elf.shdrCount elfHdr > 0) $ do
@@ -435,8 +457,8 @@ inferBinaryLayout elfHdr shdrs = do
 
     let codeAddr :: Word64
         codeAddr = fromIntegral (Elf.phdrSegmentVirtAddr codePhdr)
-    let codeOff  :: Int
-        codeOff  = fromIntegral (Elf.phdrFileStart codePhdr)
+    let codeOff :: Int
+        codeOff = fromIntegral (Elf.phdrFileStart codePhdr)
     let codeSize :: Int
         codeSize = fromIntegral (Elf.phdrFileSize codePhdr)
 
@@ -444,11 +466,11 @@ inferBinaryLayout elfHdr shdrs = do
 
     let fileOffMap = updateCodeConstraints codeAddr codeOff codeSize (imsFileOffsetMap s)
 
-    Right $ ECL { eclHeader = elfHdr
-                , eclSpecialRegionInLoad = specMap
-                , eclFileOffsetMap = fileOffMap
-                , eclCodePhdrIndex = codePhdrIndex
-                , eclRodataPhdrIndex = imsRodataPhdrIndex s
-                }
-
-
+    Right $
+      ECL
+        { eclHeader = elfHdr
+        , eclSpecialRegionInLoad = specMap
+        , eclFileOffsetMap = fileOffMap
+        , eclCodePhdrIndex = codePhdrIndex
+        , eclRodataPhdrIndex = imsRodataPhdrIndex s
+        }
