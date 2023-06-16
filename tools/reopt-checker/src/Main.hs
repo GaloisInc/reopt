@@ -1,9 +1,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# OPTIONS_GHC -Wall #-}
 
@@ -22,7 +20,7 @@ import qualified Data.ElfEdit as Elf
 import Data.Foldable (foldlM)
 import qualified Data.Map as Map
 import qualified Data.Vector as V
-import Reopt.PltParser
+import Reopt.PLTParser
 import Reopt.Relinker.Binary (inferBinaryLayout, infoIsShdrIndex)
 import Reopt.Utils.Exit (reportErrorAndExit)
 import System.Directory
@@ -219,7 +217,7 @@ checkBinary path elf shdrs = do
     -- Check section headers
     let phdrs = Elf.headerPhdrs elf
     let isInterp = hasPhdrType Elf.PT_INTERP
-    let isStatic = Elf.headerType (Elf.header elf) == Elf.ET_EXEC && null (filter isInterp phdrs)
+    let isStatic = Elf.headerType (Elf.header elf) == Elf.ET_EXEC && not (any isInterp phdrs)
     forM_ shdrs $ \shdr -> do
       checkShdrInfo path shdrs shdr
       checkShdrLink path isStatic shdrs shdr
@@ -243,7 +241,7 @@ checkBinary path elf shdrs = do
             when hasDynamic $ do
               throwError "Unexpected dynamic section with klibc loader."
           _ -> do
-            when (not hasDynamic) $ do
+            unless hasDynamic $ do
               throwError $
                 printf
                   "Expected dynamic section\n%s\n%s\n%s"
@@ -289,7 +287,7 @@ checkElf stats0 path bytes = do
   let shouldExplore =
         Elf.elfClassInstances cl $
           Elf.headerType hdr `elem` [Elf.ET_DYN, Elf.ET_EXEC]
-            && Elf.headerMachine hdr `elem` [Elf.EM_X86_64]
+            && Elf.headerMachine hdr == Elf.EM_X86_64
             && Elf.phdrCount elfHdr > 0
             && not (hasNullLoad elfHdr)
   case Elf.headerClass hdr of
@@ -372,7 +370,7 @@ main :: IO ()
 main = do
   paths <- getArgs
   when (null paths) $ do
-    hPutStrLn stderr $ "Please specify at least one file or directory for comparing."
+    hPutStrLn stderr "Please specify at least one file or directory for comparing."
     exitFailure
   errs <- foldlM (withElfFilesInDir checkElf) emptyMatchStats paths
   printMatchStats errs

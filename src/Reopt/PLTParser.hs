@@ -1,11 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Reopt.PltParser (
-  PltInfo (..),
-  PltMap,
+module Reopt.PLTParser (
+  PLTInfo (..),
+  PLTMap,
   extractPLTEntries,
-  ResolvedPltEntry (..),
-  resolvePltEntry,
+  ResolvedPLTEntry (..),
+  resolvePLTEntry,
 
   -- * Exports
   ppBuffer,
@@ -125,25 +125,25 @@ bndIndRelJmpInsn ipDelta = bndIndRelJmpInsnPrefix <> word32LE ipDelta
 -- PLTEntry
 
 -- | Information about the contents of a entry in the PLT table.
-data PltEntry
+data PLTEntry
   = -- | Function at start of .plt section that resolves entries.
-    PltResolutionFn
-  | -- | @PltStrictGotJmp idx@ jump to symbol at index idx.
+    PLTResolutionFn
+  | -- | @PLTStrictGotJmp idx@ jump to symbol at index idx.
     --
     -- It is used for jumps to global offset table.
-    PltStrictGotJmp !Word32
-  | -- | @PltLazyGotJmp addr@ jumps to `addr`.  This should be the address in the global offset table.
-    PltLazyGotJmp !Word64
-  | -- | @PushAndJumpPlt v@ pushes @v@ to the stack and then jumps to the address
+    PLTStrictGotJmp !Word32
+  | -- | @PLTLazyGotJmp addr@ jumps to `addr`.  This should be the address in the global offset table.
+    PLTLazyGotJmp !Word64
+  | -- | @PushAndJumpPLT v@ pushes @v@ to the stack and then jumps to the address
     -- at the start of the PLT entry.
-    PltIndexedStartJmp !Word32
+    PLTIndexedStartJmp !Word32
   | -- | Relative jump to given address.
-    PltJmp8 !Word64
+    PLTJmp8 !Word64
   | -- | This corresponds to a PLT that pushes a 32bit 0 to stack and
     -- jumps to next table entry.
     --
     -- It does not appear to be valid code.
-    PltPushZeroJmpNext
+    PLTPushZeroJmpNext
   | -- | Recognized a jump to a GOT entry, but the address is not relocated.
     --
     -- special case from /sbin/ldconfig.real in
@@ -153,42 +153,42 @@ data PltEntry
     --   SHA256 checksum: ba5db4f3a5a7b40d7c1c8d932926c6b5b7fdbd635859e82bdb58e1ef42ba6a87
     InvalidGotJump !Word64
 
-data ResolvedPltEntry
+data ResolvedPLTEntry
   = -- | A PLT stub that points to symbol at given index
-    PltStub !Word32
+    PLTStub !Word32
   | -- | An address supporting something that should be callable.
-    PltNotCallable
+    PLTNotCallable
 
 type GotMap = Map.Map Word64 Word32
 -- ^ Map from addresses in global address table to symbol map is for.
 
-resolvePltEntry ::
+resolvePLTEntry ::
   (Integral v, Show v) =>
   -- | Map from addresses
   GotMap ->
   -- | Address of start fo PLT entry
   v ->
-  PltEntry ->
-  Except String ResolvedPltEntry
-resolvePltEntry gotMap _pltAddr = \case
-  PltResolutionFn ->
-    pure PltNotCallable
-  PltStrictGotJmp symIdx -> do
-    pure $ PltStub symIdx
-  PltLazyGotJmp gotAddr -> do
+  PLTEntry ->
+  Except String ResolvedPLTEntry
+resolvePLTEntry gotMap _pltAddr = \case
+  PLTResolutionFn ->
+    pure PLTNotCallable
+  PLTStrictGotJmp symIdx -> do
+    pure $ PLTStub symIdx
+  PLTLazyGotJmp gotAddr -> do
     case Map.lookup gotAddr gotMap of
       Nothing -> do
-        throwError "PltLazyGotJmp address failed."
+        throwError "PLTLazyGotJmp address failed."
       Just symIdx ->
-        pure $ PltStub symIdx
-  PltIndexedStartJmp _ ->
-    pure PltNotCallable
-  PltJmp8 _ ->
-    pure PltNotCallable
-  PltPushZeroJmpNext ->
-    pure PltNotCallable
+        pure $ PLTStub symIdx
+  PLTIndexedStartJmp _ ->
+    pure PLTNotCallable
+  PLTJmp8 _ ->
+    pure PLTNotCallable
+  PLTPushZeroJmpNext ->
+    pure PLTNotCallable
   InvalidGotJump _ ->
-    pure PltNotCallable
+    pure PLTNotCallable
 
 checkInsns :: BS.ByteString -> [BS.ByteString -> Either String a] -> Either [String] a
 checkInsns actual = go []
@@ -210,7 +210,7 @@ jmpPushJumpDispatch ::
   -- | Address for start of got
   v ->
   BS.ByteString ->
-  Either String PltEntry
+  Either String PLTEntry
 jmpPushJumpDispatch pltAddr gotAddr actual = do
   let expectedInsns =
         pushAddrInsn (fromIntegral ((gotAddr + 8) - (pltAddr + 6)))
@@ -223,18 +223,18 @@ jmpPushJumpDispatch pltAddr gotAddr actual = do
   let expectedNop4Insns = [BS.pack [0x0f, 0x1f, 0x40, 0x00], BS.replicate 4 0x90]
   unless (BS.drop 12 actual `elem` expectedNop4Insns) $ do
     Left $ "pj0: Bad nop " ++ ppBuffer (BS.drop 12 actual)
-  pure PltResolutionFn
+  pure PLTResolutionFn
 
 -- | PLT header with bound prefix
-bndPltInitInsn ::
+bndPLTInitInsn ::
   Integral v =>
   -- | Address of start of PLT
   v ->
   -- | Address for start of got
   v ->
   BS.ByteString ->
-  Either String PltEntry
-bndPltInitInsn pltAddr gotAddr actual = do
+  Either String PLTEntry
+bndPLTInitInsn pltAddr gotAddr actual = do
   let expectedNop = BS.pack [0x0f, 0x1f, 0x00]
   let expected =
         pushAddrInsn (fromIntegral $ (gotAddr + 8) - (pltAddr + 6))
@@ -242,7 +242,7 @@ bndPltInitInsn pltAddr gotAddr actual = do
           <> expectedNop
   when (expected /= actual) $ do
     Left $ "bl0: " ++ ppBuffer expected
-  pure PltResolutionFn
+  pure PLTResolutionFn
 
 -- | Entry in plt with form:
 -- jmp *gotEntry
@@ -256,7 +256,7 @@ pltIdxInsns ::
   v ->
   Word32 -> -- Index of entry
   BS.ByteString ->
-  Either String PltEntry
+  Either String PLTEntry
 pltIdxInsns pltAddr pltgotAddr idx actual = do
   let tgtAddr = fromIntegral $ pltgotAddr + 8 * fromIntegral (idx + 2)
   let insnAddr = fromIntegral $ pltAddr + 16 * fromIntegral idx + 6
@@ -267,7 +267,7 @@ pltIdxInsns pltAddr pltgotAddr idx actual = do
           <> word32LE (negate (16 * (idx + 1)))
   when (expected /= actual) $ do
     Left $ "piX: " ++ ppBuffer expected
-  pure $ PltLazyGotJmp tgtAddr
+  pure $ PLTLazyGotJmp tgtAddr
 
 -- | PLT entry with endbr64 landing pad followed by bnd
 -- indirect PC relative jump.
@@ -282,7 +282,7 @@ endbrBndJmpInsns ::
   GotMap ->
   Word32 -> -- Index of entry
   BS.ByteString ->
-  Either String PltEntry
+  Either String PLTEntry
 endbrBndJmpInsns pltBaseAddr gotMap idx actual = do
   let pltEntryAddr = pltBaseAddr + 16 * fromIntegral idx
   let expectedInsn = endBr64Insn <> bndIndRelJmpInsnPrefix
@@ -302,7 +302,7 @@ endbrBndJmpInsns pltBaseAddr gotMap idx actual = do
     Nothing ->
       pure $ InvalidGotJump actualAddr
     Just symIdx -> do
-      pure $ PltStrictGotJmp symIdx
+      pure $ PLTStrictGotJmp symIdx
 
 -- | PLT header with bound prefix
 --
@@ -314,7 +314,7 @@ pltBndIdxInsns ::
   -- | Index of PLT entry
   Word32 ->
   BS.ByteString -> -- Bytes in entry
-  Either String PltEntry
+  Either String PLTEntry
 pltBndIdxInsns idx actual = do
   -- Check for endBr64Insns
   unless (endBr64Insn == BS.take 4 actual) $ do
@@ -341,7 +341,7 @@ pltBndIdxInsns idx actual = do
       -- Should be found in libc-bin_2.33-0ubuntu5_amd64.deb
       --   http://mirrors.kernel.org/ubuntu/pool/main/g/glibc/libc-bin_2.33-0ubuntu5_amd64.deb
       --   SHA256 checksum: ba5db4f3a5a7b40d7c1c8d932926c6b5b7fdbd635859e82bdb58e1ef42ba6a87
-      pure PltPushZeroJmpNext
+      pure PLTPushZeroJmpNext
     else do
       let expected1 = negate (16 * idx + 0xf)
       unless (relJmp == expected1) $ do
@@ -351,7 +351,7 @@ pltBndIdxInsns idx actual = do
             (show pushValue)
             (showHex relJmp "")
             (showHex expected1 "")
-      pure $! PltIndexedStartJmp pushValue
+      pure $! PLTIndexedStartJmp pushValue
 
 -- | PLT header with bound prefix
 --
@@ -366,7 +366,7 @@ jmp8Insns ::
   -- | Index
   Word32 ->
   BS.ByteString -> -- Bytes in entry
-  Either String PltEntry
+  Either String PLTEntry
 jmp8Insns pltAddr idx actual = do
   let pltEntryAddr = pltAddr + 8 * fromIntegral idx
   -- Check for endBr64Insns
@@ -383,32 +383,32 @@ jmp8Insns pltAddr idx actual = do
           + fromIntegral actualDelta
   unless (BS.take 2 (BS.drop 6 actual) == nopl2Insn) $ do
     Left $ "jm8: Nop " ++ ppBuffer nopl2Insn
-  pure $! PltJmp8 actualAddr
+  pure $! PLTJmp8 actualAddr
 
 -----------------------------------------------------------------------
 -- Extraction
 
-hasPlt8Size :: BS.ByteString -> Bool
-hasPlt8Size s =
+hasPLT8Size :: BS.ByteString -> Bool
+hasPLT8Size s =
   BS.length s >= 8
     && BS.take 2 s == indRelJmpInsnPrefix
     && BS.take 2 (BS.drop 6 s) == BS.pack [0x66, 0x90]
 
-checkPlt ::
+checkPLT ::
   forall w.
   Elf.ElfHeaderInfo w ->
   Maybe (Elf.ElfWordType w) ->
   GotMap ->
   Elf.Shdr BS.ByteString (Elf.ElfWordType w) ->
-  Except String (Int, V.Vector PltEntry)
-checkPlt elf mpltgotAddr gotMap shdr = Elf.elfClassInstances (Elf.headerClass (Elf.header elf)) $ do
+  Except String (Int, V.Vector PLTEntry)
+checkPLT elf mpltgotAddr gotMap shdr = Elf.elfClassInstances (Elf.headerClass (Elf.header elf)) $ do
   let shdrName = BSC.unpack (Elf.shdrName shdr)
   let fileOff = fromIntegral (Elf.shdrOff shdr)
   let fileSize = fromIntegral (Elf.shdrSize shdr)
   -- Get list of predicates that may recognize a PLT entry
   let pltContents = BS.take fileSize $ BS.drop fileOff $ Elf.headerFileContents elf
   let entrySize
-        | hasPlt8Size pltContents = 8
+        | hasPLT8Size pltContents = 8
         | otherwise = 16
   let (cnt, m) = fileSize `quotRem` entrySize
   when (m /= 0) $ do
@@ -419,9 +419,9 @@ checkPlt elf mpltgotAddr gotMap shdr = Elf.elfClassInstances (Elf.headerClass (E
   -- Check entries
   v <- forM (V.generate cnt fromIntegral) $ \(idx :: Word32) -> do
     -- Recognizers
-    let recognizers :: [BS.ByteString -> Either String PltEntry]
+    let recognizers :: [BS.ByteString -> Either String PLTEntry]
         recognizers
-          | hasPlt8Size pltContents =
+          | hasPLT8Size pltContents =
               [jmp8Insns pltAddr idx]
           | otherwise =
               case Elf.shdrName shdr of
@@ -429,7 +429,7 @@ checkPlt elf mpltgotAddr gotMap shdr = Elf.elfClassInstances (Elf.headerClass (E
                   | Just pltgotAddr <- mpltgotAddr
                   , idx == 0 ->
                       [ jmpPushJumpDispatch pltAddr pltgotAddr
-                      , bndPltInitInsn pltAddr pltgotAddr
+                      , bndPLTInitInsn pltAddr pltgotAddr
                       ]
                   | Just pltgotAddr <- mpltgotAddr ->
                       [ pltIdxInsns pltAddr pltgotAddr idx
@@ -512,15 +512,15 @@ checkRela nm dta bs allowed cnt m idx = do
       checkRela nm dta bs allowed cnt m' (idx + 1)
 
 -- | Maps offsets with PLT entries to target (if any) and size of entry.
-type PltMap w = Map.Map (Elf.ElfWordType w) (ResolvedPltEntry, Elf.ElfWordType w)
+type PLTMap w = Map.Map (Elf.ElfWordType w) (ResolvedPLTEntry, Elf.ElfWordType w)
 
 -- | Information
-data PltInfo w = PltInfo
+data PLTInfo w = PLTInfo
   { pltVirtMap :: !(Elf.VirtAddrMap w)
   , pltStrtabOff :: !(Elf.ElfWordType w)
   , pltStrtabSize :: !(Elf.ElfWordType w)
   , pltSymtabOff :: !(Elf.ElfWordType w)
-  , pltMap :: !(PltMap w)
+  , pltMap :: !(PLTMap w)
   }
 
 -- | Extract PLT entries from header.
@@ -529,7 +529,7 @@ extractPLTEntries ::
   (w ~ 64) =>
   Elf.ElfHeaderInfo w ->
   V.Vector (Elf.Shdr BS.ByteString (Elf.ElfWordType w)) ->
-  Either String (Maybe (PltInfo w))
+  Either String (Maybe (PLTInfo w))
 extractPLTEntries elf shdrs = runExcept $ do
   let dta = Elf.headerData (Elf.header elf)
   let cl = Elf.headerClass (Elf.header elf)
@@ -638,21 +638,21 @@ extractPLTEntries elf shdrs = runExcept $ do
         let gotAddrMap :: Map.Map Word64 Word32
             gotAddrMap = relaMap <> jmprelMap
         let ins ::
-              PltMap w ->
+              PLTMap w ->
               Elf.Shdr BS.ByteString (Elf.ElfWordType w) ->
-              Except String (PltMap w)
+              Except String (PLTMap w)
             ins m0 shdr
               | Elf.shdrName shdr `elem` [".plt", ".plt.got", ".plt.sec"]
               , Elf.shdrType shdr /= Elf.SHT_NOBITS = do
-                  (entrySize, pltEntries) <- checkPlt elf pltgotAddr gotAddrMap shdr
+                  (entrySize, pltEntries) <- checkPLT elf pltgotAddr gotAddrMap shdr
                   let insEntry ::
-                        PltMap w ->
+                        PLTMap w ->
                         Int ->
-                        Except String (PltMap w)
+                        Except String (PLTMap w)
                       insEntry m i = do
                         let addr = Elf.shdrAddr shdr + fromIntegral (entrySize * i)
                         let entry = pltEntries V.! i
-                        e <- resolvePltEntry gotAddrMap addr entry
+                        e <- resolvePLTEntry gotAddrMap addr entry
                         pure $! Map.insert addr (e, fromIntegral entrySize) m
                   foldlM insEntry m0 (V.generate (V.length pltEntries) id)
               | otherwise =
@@ -660,7 +660,7 @@ extractPLTEntries elf shdrs = runExcept $ do
         m <- foldlM ins Map.empty shdrs
         pure $
           Just $
-            PltInfo
+            PLTInfo
               { pltVirtMap = vmap
               , pltStrtabOff = strtabOff
               , pltStrtabSize = strtabSize
