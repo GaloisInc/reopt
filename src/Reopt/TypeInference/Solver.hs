@@ -1,57 +1,89 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms   #-}
 
-module Reopt.TypeInference.Solver
-  ( Ty (..), TyVar, RowVar, numTy, ptrTy, ptrTy', varTy,
-    SolverM, runSolverM,
-    eqTC, ptrTC, maybeGlobalTC, isNumTC, ptrSubTC,
-    freshTyVar, freshRowVar, ptrAddTC, subTypeTC,
-    OperandClass (..),
-    unifyConstraints, ConstraintSolution(..), StructName,
-    tyToLLVMType,
+module Reopt.TypeInference.Solver (
+  Ty (..),
+  TyVar,
+  RowVar,
+  numTy,
+  ptrTy,
+  ptrTy',
+  varTy,
+  SolverM,
+  runSolverM,
+  eqTC,
+  ptrTC,
+  maybeGlobalTC,
+  isNumTC,
+  ptrSubTC,
+  freshTyVar,
+  freshRowVar,
+  ptrAddTC,
+  subTypeTC,
+  OperandClass (..),
+  unifyConstraints,
+  ConstraintSolution (..),
+  StructName,
+  tyToLLVMType,
+  -- FTy stuff
+  FTy,
+  pattern FNumTy,
+  pattern FPtrTy,
+  pattern FUnknownTy,
+  pattern FNamedStruct,
+  pattern FStructTy,
+  pattern FConflictTy,
+  -- Testing
+) where
 
-    -- FTy stuff
-    FTy, pattern FNumTy, pattern FPtrTy, pattern FUnknownTy
-  , pattern FNamedStruct,  pattern FStructTy, pattern FConflictTy
-    -- Testing
-  ) where
+import Control.Monad (join)
+import Prettyprinter qualified as PP
 
-
-import           Control.Monad                            (join)
-import qualified Prettyprinter                            as PP
-
-import           Reopt.TypeInference.Solver.Constraints   (EqC (EqC), EqRowC (..),
-                                                           OperandClass (..),
-                                                           ConstraintProvenance (..))
-import           Reopt.TypeInference.Solver.Finalise      (ConstraintSolution (..))
-import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
-                                                           Conjunction (Conjunction),
-                                                           Disjunction (Disjunction),
-                                                           Schematic (DontCare, Schematic),
-                                                           Pattern (Pattern),
-                                                           PatternRHS (..),
-                                                           SolverM, addCondEq,
-                                                           addSubType,
-                                                           addTyVarEq,
-                                                           freshRowVar,
-                                                           freshRowVarFM,
-                                                           freshTyVar,
-                                                           ptrWidthNumTy,
-                                                           runSolverM,
-                                                           withFresh)
-import           Reopt.TypeInference.Solver.RowVariables  (FieldMap,
-                                                           RowExpr (..), RowVar,
-                                                           singletonFieldMap, Offset)
-import           Reopt.TypeInference.Solver.Solver        (unifyConstraints)
-import           Reopt.TypeInference.Solver.TypeVariables (TyVar (..))
-import           Reopt.TypeInference.Solver.Types         (FTy (..), ITy (..),
-                                                           StructName, TyF (..),
-                                                           tyToLLVMType)
+import Reopt.TypeInference.Solver.Constraints (
+  ConstraintProvenance (..),
+  EqC (EqC),
+  EqRowC (..),
+  OperandClass (..),
+ )
+import Reopt.TypeInference.Solver.Finalise (ConstraintSolution (..))
+import Reopt.TypeInference.Solver.Monad (
+  Conditional (..),
+  Conjunction (Conjunction),
+  Disjunction (Disjunction),
+  Pattern (Pattern),
+  PatternRHS (..),
+  Schematic (DontCare, Schematic),
+  SolverM,
+  addCondEq,
+  addSubType,
+  addTyVarEq,
+  freshRowVar,
+  freshRowVarFM,
+  freshTyVar,
+  ptrWidthNumTy,
+  runSolverM,
+  withFresh,
+ )
+import Reopt.TypeInference.Solver.RowVariables (
+  FieldMap,
+  Offset,
+  RowExpr (..),
+  RowVar,
+  singletonFieldMap,
+ )
+import Reopt.TypeInference.Solver.Solver (unifyConstraints)
+import Reopt.TypeInference.Solver.TypeVariables (TyVar (..))
+import Reopt.TypeInference.Solver.Types (
+  FTy (..),
+  ITy (..),
+  StructName,
+  TyF (..),
+  tyToLLVMType,
+ )
 
 -- This type is easier to work with, as it isn't normalised.
-data Ty =
-  Var TyVar
-  | Ty  (TyF (FieldMap Ty) Ty)
+data Ty
+  = Var TyVar
+  | Ty (TyF (FieldMap Ty) Ty)
 
 -- Smart constructors for Ty
 
@@ -75,15 +107,16 @@ nameTy ty = freshTyVar Nothing . Just =<< compileTy ty
 
 compileTy :: Ty -> SolverM ITy
 compileTy (Var tv) = pure (VarTy tv)
-compileTy (Ty ty)  = ITy <$>
-  case ty of
-    NumTy n  -> pure (NumTy n)
-    PtrTy fm -> do
-      fm' <- traverse nameTy fm
-      PtrTy . RowExprVar <$> freshRowVarFM fm'
-    ConflictTy n -> pure (ConflictTy n)
-    TupleTy ts -> TupleTy <$> traverse nameTy ts
-    VecTy n ty' -> VecTy n <$> nameTy ty'
+compileTy (Ty ty) =
+  ITy
+    <$> case ty of
+      NumTy n -> pure (NumTy n)
+      PtrTy fm -> do
+        fm' <- traverse nameTy fm
+        PtrTy . RowExprVar <$> freshRowVarFM fm'
+      ConflictTy n -> pure (ConflictTy n)
+      TupleTy ts -> TupleTy <$> traverse nameTy ts
+      VecTy n ty' -> VecTy n <$> nameTy ty'
 
 --------------------------------------------------------------------------------
 -- Constraint constructors
@@ -109,7 +142,7 @@ isNumTC prov tv n = join $ addTyVarEq prov <$> nameTy tv <*> pure (ITy $ NumTy n
 
 ptrAddTC :: ConstraintProvenance -> Ty -> Ty -> Ty -> OperandClass -> SolverM ()
 ptrAddTC prov rty lhsty rhsty oc = do
-  rv    <- nameTy rty
+  rv <- nameTy rty
   lhstv <- nameTy lhsty
   rhstv <- nameTy rhsty
   ptrNumTy <- ITy <$> ptrWidthNumTy
@@ -134,7 +167,8 @@ ptrAddTC prov rty lhsty rhsty oc = do
             , Conjunction [isConflict rhstv]
             ]
       , cConstraints =
-          ( [ EqC rv (VarTy lhstv) prov
+          (
+            [ EqC rv (VarTy lhstv) prov
             , EqC rv (VarTy rhstv) prov
             ]
           , []
@@ -218,19 +252,22 @@ ptrAddTC prov rty lhsty rhsty oc = do
 --   , cAddConstraints = addTyVarEq rv (VarTy lhstv) >> addTyVarEq rv (VarTy rhstv)
 --   }
 
-{- | @ptrAddTC rty lhsty rhsty oc@ is emitted when we have a
-subtraction, or addition with a negative offset.
--}
+-- | @ptrAddTC rty lhsty rhsty oc@ is emitted when we have a
+-- subtraction, or addition with a negative offset.
 ptrSubTC :: ConstraintProvenance -> Ty -> Ty -> Ty -> OperandClass -> SolverM ()
 ptrSubTC prov rty lhsty rhsty oc = do
-  rv    <- nameTy rty
+  rv <- nameTy rty
   lhstv <- nameTy lhsty
   rhstv <- nameTy rhsty
   ptrNumTy <- ITy <$> ptrWidthNumTy
 
   -- Numeric cases
-  let name       = PP.pretty rv <> " = " <> PP.pretty lhstv <> " - " <>
-                   PP.pretty rhstv
+  let name =
+        PP.pretty rv
+          <> " = "
+          <> PP.pretty lhstv
+          <> " - "
+          <> PP.pretty rhstv
 
   -- If we have a numeric result and at least one numberic argument,
   -- or we have a numeric lhs, we can infer we are doing a numeric sub
@@ -246,7 +283,8 @@ ptrSubTC prov rty lhsty rhsty oc = do
             , Conjunction [isConflict rhstv]
             ]
       , cConstraints =
-          ( [ EqC rv (VarTy lhstv) prov
+          (
+            [ EqC rv (VarTy lhstv) prov
             , EqC rv (VarTy rhstv) prov
             ]
           , []

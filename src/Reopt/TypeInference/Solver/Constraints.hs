@@ -1,28 +1,26 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DeriveTraversable #-}
 
 module Reopt.TypeInference.Solver.Constraints where
 
-import           Data.Function                            (on)
-import qualified Data.Set                                 as Set
-import           GHC.Generics                             (Generic)
-import qualified Prettyprinter                            as PP
-import           Reopt.CFG.FnRep                          (FnArchConstraints, FnAssignment, FnStmt)
-import           Reopt.TypeInference.Solver.RowVariables  (RowExpr, Offset)
-import           Reopt.TypeInference.Solver.TypeVariables (TyVar)
-import           Reopt.TypeInference.Solver.Types         (FreeRowVars (..),
-                                                           FreeTyVars (..), ITy)
+import Data.Function (on)
+import Data.Set qualified as Set
+import GHC.Generics (Generic)
+import Prettyprinter qualified as PP
+import Reopt.CFG.FnRep (FnArchConstraints, FnAssignment, FnStmt)
+import Reopt.TypeInference.Solver.RowVariables (Offset, RowExpr)
+import Reopt.TypeInference.Solver.TypeVariables (TyVar)
+import Reopt.TypeInference.Solver.Types (
+  FreeRowVars (..),
+  FreeTyVars (..),
+  ITy,
+ )
 
 -- | @EqC t1 t2@ means @t1@ and @t2@ are literally the same type.
 data EqC = EqC
-  { eqLhs  :: !TyVar,
-    eqRhs  :: !ITy,
-    eqProv :: !ConstraintProvenance
+  { eqLhs :: !TyVar
+  , eqRhs :: !ITy
+  , eqProv :: !ConstraintProvenance
   }
   deriving (Show, Generic)
 
@@ -44,10 +42,11 @@ instance PP.Pretty EqC where
 -- | Pretty-print an 'EqC', including its provenance.
 ppEqCWithProv :: EqC -> PP.Doc ann
 ppEqCWithProv eqC =
-  PP.align $ PP.vsep
-    [ PP.pretty eqC
-    , PP.hang 2 $ "Provenance: " <> PP.pretty (eqProv eqC)
-    ]
+  PP.align $
+    PP.vsep
+      [ PP.pretty eqC
+      , PP.hang 2 $ "Provenance: " <> PP.pretty (eqProv eqC)
+      ]
 
 instance FreeTyVars EqC where
   freeTyVars (EqC t1 t2 _) = Set.union (freeTyVars t1) (freeTyVars t2)
@@ -57,8 +56,8 @@ instance FreeRowVars EqC where
 
 -- | Stands for: lhs = { offsets | rhs }
 data EqRowC = EqRowC
-  { eqRowLHS :: !RowExpr,
-    eqRowRHS :: !RowExpr
+  { eqRowLHS :: !RowExpr
+  , eqRowRHS :: !RowExpr
   }
   deriving (Eq, Ord, Show)
 
@@ -76,20 +75,23 @@ instance FreeRowVars EqRowC where
 
 -- | What sort of constant operand we are dealing with for an
 -- addition.
-data OperandClass =
-  OCSymbolic   -- ^ The second operand is not a constant
-  | OCOffset Offset -- ^ The second operand is a small constant, we
-                     -- already know it is a number (from constraint
-                     -- generation.)
-  | OCPointer -- ^ The second operand could be in an ELF segment.
+data OperandClass
+  = -- | The second operand is not a constant
+    OCSymbolic
+  | -- | The second operand is a small constant, we
+    -- already know it is a number (from constraint
+    -- generation.)
+    OCOffset Offset
+  | -- | The second operand could be in an ELF segment.
+    OCPointer
   deriving (Eq, Ord, Show)
 
 instance PP.Pretty OperandClass where
   pretty c =
     case c of
-      OCSymbolic      -> mempty
+      OCSymbolic -> mempty
       OCOffset offset -> prettySExp ["+", PP.pretty offset]
-      OCPointer       -> "?"
+      OCPointer -> "?"
 
 instance FreeTyVars OperandClass where
   freeTyVars _ = mempty
@@ -126,11 +128,11 @@ pattern a :<: b = SubC a b
 {-# COMPLETE (:<:) #-}
 
 type SubTypeC = SubC TyVar
-type SubRowC  = SubC RowExpr
+type SubRowC = SubC RowExpr
 
 instance PP.Pretty a => PP.Pretty (SubC a) where
   pretty (a :<: b) =
-    prettySExp [ PP.pretty a, "<:", PP.pretty b]
+    prettySExp [PP.pretty a, "<:", PP.pretty b]
 
 instance FreeTyVars a => FreeTyVars (SubC a) where
   freeTyVars (a :<: b) = freeTyVars a `Set.union` freeTyVars b
@@ -145,21 +147,21 @@ instance FreeRowVars a => FreeRowVars (SubC a) where
 data ConstraintProvenance where
   -- | A constraint arising from a @FnRep@-related value.
   FnRepProv ::
-       FnArchConstraints arch
-    => FnRepProvenance arch tp
-    -> ConstraintProvenance
+    FnArchConstraints arch =>
+    FnRepProvenance arch tp ->
+    ConstraintProvenance
   -- | A placeholder origin to use for @_cgenConstraintProv@ before constraints
   -- have been generated for a particular block.
   BlockProv ::
-       ConstraintProvenance
+    ConstraintProvenance
   -- | A constraint arising from a conflict during type inference.
   ConflictProv ::
     ConstraintProvenance
   -- | An 'EqC' that arose during unification.
   UnificationProv ::
-       TyVar
-    -> TyVar
-    -> ConstraintProvenance
+    TyVar ->
+    TyVar ->
+    ConstraintProvenance
   -- | A generic origin to use for constraints arising from 'EqRowC'
   -- constraints. We may want to refine this to include more information.
   FromEqRowCProv ::
@@ -194,11 +196,11 @@ instance Show ConstraintProvenance where
 -- @FnRep@-related.
 data FnRepProvenance arch tp where
   FnAssignmentProv ::
-       FnAssignment arch tp
-    -> FnRepProvenance arch tp
+    FnAssignment arch tp ->
+    FnRepProvenance arch tp
   FnStmtProv ::
-       FnStmt arch
-    -> FnRepProvenance arch tp
+    FnStmt arch ->
+    FnRepProvenance arch tp
 
 instance FnArchConstraints arch => PP.Pretty (FnRepProvenance arch tp) where
   pretty (FnAssignmentProv rhs) = PP.pretty rhs
