@@ -25,7 +25,7 @@ module Reopt.CFG.LLVM (
   functionTypeToLLVM,
   Intrinsic,
   intrinsic,
-  FunLLVMContext (archFns, funLLVMGenOptions),
+  FunLLVMContext (archFns, funLLVMGenOptions, withArchConstraints),
   BBLLVM,
   typeToLLVMType,
   setAssignIdValue,

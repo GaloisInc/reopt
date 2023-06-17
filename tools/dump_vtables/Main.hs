@@ -1,123 +1,149 @@
 -- dump_vtables
 -- Takes an ELF file as input and attempts to dump the contents of the
 -- vtables.
-
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternGuards #-}
 
 module Main (main) where
 
-import Control.Lens
+import Control.Lens ((^..))
 import Data.ElfEdit
-import Data.List
-import Data.List.Split
+import Data.List (intercalate, isInfixOf)
+import Data.List.Split (chunksOf)
 import Data.Macaw.Memory (bsWord32le, bsWord64le)
-import Data.Word
-import Reopt
-import System.Environment
+import Data.Word (Word64)
+import Reopt (parseElfHeaderInfo64, showPaddedHex)
+import System.Environment (getArgs)
 
+import Control.Monad (unless, when)
 import qualified Data.ByteString as B
-import qualified Data.Vector as V
 import qualified Data.ByteString.Char8 as C
+import qualified Data.Vector as V
+import Reopt.Utils.Exit (checkedReadFile, handleEitherStringWithExit)
+import System.Exit (exitFailure)
+import System.IO (hPrint, hPutStrLn, stderr)
 
 ------------------------------------------------------------------------
 -- Utilities
 
 -- | Trim the leading zeros
 trimLeadingZeros :: String -> String
-trimLeadingZeros = dropWhile (=='0')
+trimLeadingZeros = dropWhile (== '0')
 
 -- Get a section by its section index.
 elfSection :: Elf 64 -> ElfSectionIndex -> ElfSection Word64
 elfSection e i
   | [section] <- sections = section
-  | (_:_) <- sections = error $ "Multiple sections with index " ++ show idx
-  | _     <- sections = error $ "No sections with index " ++ show idx
-  where idx = fromElfSectionIndex i
-        sections = filter (hasSectionIndex idx) (e^..elfSections)
-        hasSectionIndex _jdx section = elfSectionIndex section == idx
+  | (_ : _) <- sections = error $ "Multiple sections with index " ++ show idx
+  | _ <- sections = error $ "No sections with index " ++ show idx
+ where
+  idx = fromElfSectionIndex i
+  sections = filter (hasSectionIndex idx) (e ^.. elfSections)
+  hasSectionIndex _jdx section = elfSectionIndex section == idx
 
 -- | Read a null-terminated byte string from memory given a 64-bit address.
 readNTBSFromAddr :: Elf 64 -> Word64 -> B.ByteString
-readNTBSFromAddr e ptr = B.takeWhile (/=0) $ readElfAddr e ptr 100
+readNTBSFromAddr e ptr = B.takeWhile (/= 0) $ readElfAddr e ptr 100
 
 -- | Read a specified number of bytes from an elf section at a specific
 -- address.
 readElfSection :: ElfSection Word64 -> Word64 -> Word64 -> B.ByteString
 readElfSection section addr size =
   B.take (fromIntegral size) (B.drop adjustedAddr (elfSectionData section))
-  where adjustedAddr = fromIntegral $ addr - (elfSectionAddr section)
+ where
+  adjustedAddr = fromIntegral $ addr - elfSectionAddr section
 
 readElfAddr :: Elf 64 -> Word64 -> Word64 -> B.ByteString
 readElfAddr e addr size = case sections of
-                            (section:_) -> readElfSection section addr size
-                            _           -> error "couldn't find section"
-  where sections = filter (hasAddr addr) (e^..elfSections)
-        hasAddr a section
-          =  elfSectionAddr section <= a
-          && a < elfSectionAddr section + elfSectionSize section
+  (section : _) -> readElfSection section addr size
+  _ -> error "couldn't find section"
+ where
+  sections = filter (hasAddr addr) (e ^.. elfSections)
+  hasAddr a section =
+    elfSectionAddr section <= a
+      && a < elfSectionAddr section + elfSectionSize section
 
 ------------------------------------------------------------------------
 -- VTable datatype
 -- TODO: add more information about the various fields
 
 -- | RTTI datatype.
-data RTTI = RTTI { rttiAddr :: Word64
-                 , typeInfoAddr :: Word64 -- pointer to type_info vtable.
-                 , rttiMangledName :: B.ByteString
-                 , rttiMangledNameAddr :: Word64
-                 , rttiParentRTTIAddrs :: [Word64]
-                 } deriving (Eq)
+data RTTI = RTTI
+  { rttiAddr :: Word64
+  , typeInfoAddr :: Word64 -- pointer to type_info vtable.
+  , rttiMangledName :: B.ByteString
+  , rttiMangledNameAddr :: Word64
+  , rttiParentRTTIAddrs :: [Word64]
+  }
+  deriving (Eq)
 
 instance Show RTTI where
-  show r  =
-    "addr = " ++ trimLeadingZeros (showPaddedHex (rttiAddr r)) ++ ", " ++
-    "name = " ++ show (rttiMangledName r) ++ ", " ++
-    "parentRTTIAddrs = " ++ intercalate ", " (map (trimLeadingZeros . showPaddedHex) (rttiParentRTTIAddrs r))
+  show r =
+    "addr = "
+      ++ trimLeadingZeros (showPaddedHex (rttiAddr r))
+      ++ ", "
+      ++ "name = "
+      ++ show (rttiMangledName r)
+      ++ ", "
+      ++ "parentRTTIAddrs = "
+      ++ intercalate ", " (map (trimLeadingZeros . showPaddedHex) (rttiParentRTTIAddrs r))
 
 -- | VTable datatype.
-data VTable = VTable { vTableAddr :: Word64
-                     , vTableSize :: Word64
-                     , vTableOffset :: Word64
-                     -- ^ offset to top (TODO)
-                     , vTableRTTI :: Maybe RTTI
-                     , vTableFPtrs :: [Word64]
-                     , vTableContents :: B.ByteString
-                     } deriving (Eq)
+data VTable = VTable
+  { vTableAddr :: Word64
+  , vTableSize :: Word64
+  , vTableOffset :: Word64
+  -- ^ offset to top (TODO)
+  , vTableRTTI :: Maybe RTTI
+  , vTableFPtrs :: [Word64]
+  , vTableContents :: B.ByteString
+  }
+  deriving (Eq)
 
 instance Show VTable where
   show (VTable addr size offset rtti _fptrs _contents) =
-    "VTable:\n" ++
-    "  Address: " ++ trimLeadingZeros (showPaddedHex addr) ++ "\n" ++
-    "  Size: " ++ show size ++ " bytes\n" ++
-    "  Offset: " ++ show offset ++ "\n" ++
-    "  RTTI: " ++ rttiString ++ "\n"
+    "VTable:\n"
+      ++ "  Address: "
+      ++ trimLeadingZeros (showPaddedHex addr)
+      ++ "\n"
+      ++ "  Size: "
+      ++ show size
+      ++ " bytes\n"
+      ++ "  Offset: "
+      ++ show offset
+      ++ "\n"
+      ++ "  RTTI: "
+      ++ rttiString
+      ++ "\n"
+   where
     -- "  Function addrs: " ++ intercalate "," (map (trimLeadingZeros . showPaddedHex)
     -- fptrs)
-    where rttiString = case rtti of
-                         Nothing -> "not present"
-                         Just x -> show x
+    rttiString = maybe "not present" show rtti
+
 ------------------------------------------------------------------------
 -- Extracting VTables
 
 -- | Get the vtable symbol table entries from the symbol table.
-vTableEntries :: Elf 64 -> ElfSymbolTable Word64 -> [ElfSymbolTableEntry Word64]
+vTableEntries :: Elf 64 -> Symtab 64 -> [SymtabEntry C.ByteString Word64]
 vTableEntries e =
-  filter (isVTableEntry e) . V.toList . elfSymbolTableEntries
-  where
-    isVTableEntry _e ste = B.isPrefixOf "_ZTV" (steName ste)
-                           && elfSectionName (section ste) == ".rodata"
-                           -- ^ This is a guess. So far they've all been in .rodata.
-    section ste = elfSection e (steIndex ste)
-    -- TODO: ByteString has a IsString instance, so use B.fromString
+  filter (isVTableEntry e) . V.toList . symtabEntries
+ where
+  isVTableEntry _e ste =
+    B.isPrefixOf "_ZTV" (steName ste)
+      && elfSectionName (section ste) == ".rodata"
+  -- \^ This is a guess. So far they've all been in .rodata.
+  section ste = elfSection e (steIndex ste)
+
+-- TODO: ByteString has a IsString instance, so use B.fromString
 --    ztv = "_ZTV"
 --    rodata = ".rodata"
 --    rodata = B.pack [46,114,111,100,97,116,97]
 
-data InheritanceType = BaseInheritance
-                     | SingleInheritance
-                     | MultipleInheritance
+data InheritanceType
+  = BaseInheritance
+  | SingleInheritance
+  | MultipleInheritance
   deriving (Show, Eq)
 
 -- | Determine what kind of inheritance, given the vtable of the corresponding
@@ -130,81 +156,88 @@ typeInfoInheritance e addr =
       nameAddr = bsWord64le $ readElfAddr e addrNameAddr 8
       name = C.unpack $ readNTBSFromAddr e nameAddr
       -- TODO: maybe find a better way to do this...
-      single   = isInfixOf "si_class_type_info"  name
+      single = isInfixOf "si_class_type_info" name
       multiple = isInfixOf "vmi_class_type_info" name
-  in case (single, multiple) of
-       (False, False) -> BaseInheritance
-       (True, _) -> SingleInheritance
-       _         -> MultipleInheritance
+   in case (single, multiple) of
+        (False, False) -> BaseInheritance
+        (True, _) -> SingleInheritance
+        _ -> MultipleInheritance
 
 -- | Build an RTTI datatype from an address
 rttiFromPtr :: Elf 64 -> Word64 -> Maybe RTTI
 rttiFromPtr e ptr
   | B.null contents = Nothing
-  | otherwise = Just $
-      RTTI { rttiAddr = ptr
-           , typeInfoAddr = tiAddr
-           , rttiMangledName = rttiName
-           , rttiMangledNameAddr = rttiNameAddr
-           , rttiParentRTTIAddrs =
-               case inheritanceType of
-                 BaseInheritance -> []
-                 SingleInheritance -> [(bsWord64le . B.take 8 . B.drop 16) contents]
-                 MultipleInheritance ->
-                   let numParents = (fromIntegral . toInteger . bsWord32le . B.take 4 . B.drop 20) contents
-                       allParents = B.take (16*numParents) $ B.drop 24 contents
-                       parentChunks = map (take 8) $ chunksOf 16 $ B.unpack allParents
-                    in map bsWord64le $ map B.pack $ parentChunks
-           }
-  where contents = readElfAddr e ptr 128
-        tiAddr = bsWord64le $ B.take 8 contents
-        rttiNameAddr = (bsWord64le . B.take 8 . B.drop 8) contents
-        rttiName = readNTBSFromAddr e rttiNameAddr
-        inheritanceType = typeInfoInheritance e tiAddr
+  | otherwise =
+      Just $
+        RTTI
+          { rttiAddr = ptr
+          , typeInfoAddr = tiAddr
+          , rttiMangledName = rttiName
+          , rttiMangledNameAddr = rttiNameAddr
+          , rttiParentRTTIAddrs =
+              case inheritanceType of
+                BaseInheritance -> []
+                SingleInheritance -> [(bsWord64le . B.take 8 . B.drop 16) contents]
+                MultipleInheritance ->
+                  let numParents = (fromIntegral . toInteger . bsWord32le . B.take 4 . B.drop 20) contents
+                      allParents = B.take (16 * numParents) $ B.drop 24 contents
+                      parentChunks = map (take 8) $ chunksOf 16 $ B.unpack allParents
+                   in bsWord64le . B.pack <$> parentChunks
+          }
+ where
+  contents = readElfAddr e ptr 128
+  tiAddr = bsWord64le $ B.take 8 contents
+  rttiNameAddr = (bsWord64le . B.take 8 . B.drop 8) contents
+  rttiName = readNTBSFromAddr e rttiNameAddr
+  inheritanceType = typeInfoInheritance e tiAddr
 
 -- | Build a VTable datatype from an elf object and a particular symbol table entry.
-vTableFromSTE :: Elf 64 -> ElfSymbolTableEntry Word64 -> VTable
-vTableFromSTE e ste = VTable { vTableAddr = addr
-                             , vTableSize = size
-                             , vTableFPtrs = fptrs
-                             , vTableOffset = (bsWord64le . B.take 8) contents
-                             , vTableRTTI = rtti
-                             , vTableContents = contents
-                             }
-  where addr = steValue ste
-        size = steSize ste
-        -- TODO: Why is there an ElfSectionIndex type? Why not just
-        -- use Word16? Given the answer to that question, why does the
-        -- ElfSection type use a Word16 as its index instead of
-        -- ElfSectionIndex?
-        contents = readElfAddr e addr size
-        rttiPtr = bsWord64le $ B.take 8 $ B.drop 8 $ contents
-        rtti = rttiFromPtr e rttiPtr
-        fptrs = map bsWord64le $ map B.pack $ chunksOf 8 $ B.unpack $ B.drop 16 $ contents
-        -- TODO: fptrs is broken for multiple inheritance
+vTableFromSTE :: Elf 64 -> SymtabEntry a Word64 -> VTable
+vTableFromSTE e ste =
+  VTable
+    { vTableAddr = addr
+    , vTableSize = size
+    , vTableFPtrs = fptrs
+    , vTableOffset = (bsWord64le . B.take 8) contents
+    , vTableRTTI = rtti
+    , vTableContents = contents
+    }
+ where
+  addr = steValue ste
+  size = steSize ste
+  -- TODO: Why is there an ElfSectionIndex type? Why not just
+  -- use Word16? Given the answer to that question, why does the
+  -- ElfSection type use a Word16 as its index instead of
+  -- ElfSectionIndex?
+  contents = readElfAddr e addr size
+  rttiPtr = bsWord64le $ B.take 8 $ B.drop 8 contents
+  rtti = rttiFromPtr e rttiPtr
+  fptrs = map (bsWord64le . B.pack) $ chunksOf 8 $ B.unpack $ B.drop 16 contents
+
+-- TODO: fptrs is broken for multiple inheritance
 
 -- | Get a list of all the VTables in an Elf 64 object.
 vTablesFromElf64 :: Elf 64 -> Either String [VTable]
 vTablesFromElf64 e =
   case elfSymtab e of
-    []     -> Left "No symbol table; can't find vtables yet! (not implemented)"
-    (s:[]) -> Right $ map (vTableFromSTE e) $ vTableEntries e s
-    _      -> Left "Need exactly one symbol table in ELF file"
+    [] -> Left "No symbol table; can't find vtables yet! (not implemented)"
+    [s] -> Right $ map (vTableFromSTE e) $ vTableEntries e s
+    _ -> Left "Need exactly one symbol table in ELF file"
 
 ------------------------------------------------------------------------
--- | main
 
+-- | main
 main :: IO ()
 main = do
   args <- getArgs
   case args of
-    (bFileName:_) -> do
+    (bFileName : _) -> do
       when (null bFileName) $ do
         hPutStrLn stderr "Missing file"
         exitFailure
-      bs <- checkedReadFilebFileName
+      bs <- checkedReadFile bFileName
       hdr <- handleEitherStringWithExit $ parseElfHeaderInfo64 bFileName bs
-      let (l, e) = Elf.getElf hdr
+      let (l, e) = getElf hdr
       unless (null l) $ do
         hPutStrLn stderr "Recoverable errors occurred in reading elf file:"
         mapM_ (hPrint stderr) l

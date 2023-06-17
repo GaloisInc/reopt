@@ -51,7 +51,9 @@ import Data.Macaw.Utils.IncComp (
 
 import Data.Functor (($>))
 import Reopt
+import Reopt.ELFArchInfo (processX86PLTEntries, warnABIUntested)
 import Reopt.TypeInference.FunTypeMaps (symAddrMapContents)
+import Reopt.X86 (X86OS (..), osArchitectureInfo, x86OSForABI)
 
 -------------------------------------------------------------------------------
 -- Encode

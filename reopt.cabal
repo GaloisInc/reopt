@@ -90,28 +90,30 @@ library
     Reopt.CFG.FnRep
     Reopt.CFG.FnRep.X86
     Reopt.CFG.LLVM
+    Reopt.ELFArchInfo
     Reopt.EncodeInvariants
     Reopt.Events
     Reopt.Events.Export
     Reopt.ExternalTools
     Reopt.Occam
-    Reopt.PltParser
+    Reopt.PLTParser
     Reopt.Relinker.Binary
     Reopt.Server
-    Reopt.TypeInference.Solver
-    Reopt.TypeInference.Solver.Constraints
-    Reopt.TypeInference.Solver.Monad
-    Reopt.TypeInference.Solver.Solver
-    Reopt.TypeInference.Solver.RowVariables
-    Reopt.TypeInference.Solver.Finalise
-    Reopt.TypeInference.Solver.TypeVariables
-    Reopt.TypeInference.Solver.Types
-    Reopt.TypeInference.Solver.UnionFindMap
     Reopt.TypeInference.ConstraintGen
     Reopt.TypeInference.FunTypeMaps
     Reopt.TypeInference.Pretty
+    Reopt.TypeInference.Solver
+    Reopt.TypeInference.Solver.Constraints
+    Reopt.TypeInference.Solver.Finalise
+    Reopt.TypeInference.Solver.Monad
+    Reopt.TypeInference.Solver.RowVariables
+    Reopt.TypeInference.Solver.Solver
+    Reopt.TypeInference.Solver.Types
+    Reopt.TypeInference.Solver.TypeVariables
+    Reopt.TypeInference.Solver.UnionFindMap
     Reopt.Utils.Dir
     Reopt.Utils.Exit
+    Reopt.X86
   other-modules:
     Reopt.Analysis.Domains.DiffEquations
     Reopt.ArgResolver

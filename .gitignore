@@ -1,5 +1,7 @@
-/.ghcid
-/.vscode
+.direnv
+.envrc
+.ghcid
+.vscode
 /attic
 /cabal.project.freeze
 /cabal.project.local
