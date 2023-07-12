@@ -21,8 +21,7 @@ tests: true
 
 -- NOTE: This applies to the whole package: reopt and reopt-explore
 package reopt
-  -- no-deprecations until we get rid of ansi-wl-pprint dependency in reopt-explore
-  ghc-options: -Wall -Werror -Wno-deprecations
+  ghc-options: -Wall -Werror
 package reopt-tools
   ghc-options: -Wall
 package reopt-vcg-ann
