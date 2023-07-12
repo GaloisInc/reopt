@@ -186,7 +186,6 @@ executable reopt-explore
   import: extensions
   default-language: Haskell2010
   build-depends:
-    ansi-wl-pprint,
     base >= 4,
     bytestring,
     cmdargs,
@@ -202,6 +201,7 @@ executable reopt-explore
     mtl,
     optparse-applicative,
     parameterized-utils >= 0.1.6,
+    prettyprinter,
     reopt,
     unix,
     vector
