@@ -39,6 +39,8 @@ typedef unsigned uint32_t;
 typedef void* DIR; // yikes
 typedef void* FILE; // yikes
 
+typedef void* char32_t; // yikes
+typedef void* mbstate_t; // yikes
 typedef uint_t mode_t;
 typedef long off_t;
 typedef long long off64_t; // ???
@@ -62,6 +64,7 @@ closedir
 readdir64
 */
 
+size_t __ctype_get_mb_cur_max(void);
 int __xstat64(int ver, const char * path, struct_stat64 * stat_buf);
 int __lxstat64(int ver, const char * path, struct_stat64 * stat_buf);
 int __fxstat64(int ver, int fildes, struct_stat64 * stat_buf);
@@ -70,7 +73,9 @@ int accept(int sockfd, void *addr, socklen_t *addrlen);
 int atoi(const char *nptr);
 
 int bind(int sockfd, const void *addr, socklen_t addrlen);
+char *bindtextdomain(const char *domainname, const char *dirname);
 
+void *calloc(size_t num, size_t size);
 int chdir(const char *path);
 int chmod(const char *path, mode_t mode);
 int chown(const char *pathname, uid_t owner, gid_t group);
@@ -79,10 +84,15 @@ int closedir(DIR *dirp);
 int connect(int sockfd, const sockaddr *addr, socklen_t addrlen);
 
 char *db_version(int *major, int *minor, int *patch);
+char *dgettext(const char *domainname, const char *msgid);
+char *dcgettext (const char *domainname, const char *msgid, int category);
 
 int epoll_create(int size);
 int epoll_ctl(int epfd, int op, int fd, struct_epoll_event *event);
 int epoll_wait(int epfd, struct_epoll_event *events, int maxevents, int timeout);
+// These are variadic, can't handle in header yet.
+// void error(int status, int errnum, const char *format, ...);
+// void error_at_line(int status, int errnum, const char *filename, unsigned int linenum, const char *format, ...);
 
 int fflush(FILE *stream);
 int fchdir(int fd);
@@ -125,6 +135,7 @@ int getrlimit(int resource, struct_rlimit *rlim);
 char *gets(char *s);
 int getsockname(int sockfd, struct_sockaddr *restrict addr, socklen_t *restrict addrlen);
 int getsockopt(int sockfd, int level, int optname, void *optval, socklen_t *optlen);
+char *gettext (const char *msgid);
 int gettimeofday(struct_timeval *restrict tv, struct_timezone *restrict tz);
 uid_t getuid();
 
@@ -143,6 +154,7 @@ int listen(int sockfd, int backlog);
 off_t lseek(int fd, off_t offset, int whence);
 
 void* malloc(size_t numbytes);
+size_t mbrtoc32(char32_t restrict *pc32, const char *restrict s, size_t n, mbstate_t *restrict ps);
 void* memchr(const void *str, int c, size_t n);
 void* memcpy(void *dest, const void *src, size_t n);
 void* memmove(void *dest, const void *src, size_t n);
@@ -170,6 +182,7 @@ struct_dirent *readdir(DIR *dirp);
 struct_dirent64 *readdir64(DIR *dirp);
 ssize_t readlink(const char *path, char *buf, size_t bufsiz);
 void *realloc(void *ptr, size_t size);
+void *reallocarray(void *ptr, size_t nmemb, size_t size);
 int regcomp(regex_t *restrict preg, const char *restrict pattern, int cflags);
 size_t regerror(int errcode, const regex_t *preg, char *errbuf, size_t errbuf_size);
 int regexec(const regex_t *preg, const char *string, size_t nmatch, regmatch_t *pmatch, int eflags);
@@ -213,6 +226,7 @@ char* strtok(char *str, const char *delimiters );
 int system(const char *command);
 
 int tcgetattr(int fd, struct_termios *termios_p);
+char *textdomain(const char *domainname);
 time_t time(time_t *);
 int truncate(const char *path, off_t length);
 void tzset();
