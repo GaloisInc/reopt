@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Reopt.TypeInference.Solver.Solver (
@@ -19,7 +20,7 @@ import Control.Monad.State (MonadState (get), StateT, evalStateT, put)
 import Data.Bifunctor (Bifunctor (second), first)
 import Data.Foldable (traverse_)
 import Data.Functor (($>))
-import Data.Generics.Product (field)
+import Data.Generics.Labels ()
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isNothing)
 import Data.Set qualified as Set
@@ -96,7 +97,7 @@ unifyConstraints = do
 -- | @traceContext description ctx ctx'@ reports how the context changed via @trace@.
 traceContext :: PP.Doc () -> SolverM a -> SolverM a
 traceContext description action = do
-  tId <- field @"nextTraceId" <<+= 1
+  tId <- #nextTraceId <<+= 1
   doTraceUnification <- traceUnification
   doTraceConstraintOrigins <- traceConstraintOrigins
 
@@ -252,12 +253,12 @@ solverLoop = evalStateT go =<< get
     when keepGoing go
 
   solvers =
-    [ solveHeadReset (field @"ctxEqCs") solveEqC
-    , solveHead (field @"ctxEqRowCs") solveEqRowC
-    , solveFirst (field @"ctxCondEqs") solveConditional
-    , solveFirst (field @"ctxSubTypeCs") solveSubTypeC
-    , preprocess (field @"ctxSubRowCs") resolveCycles
-    , solveFirst (field @"ctxSubRowCs") solveSubRowC
+    [ solveHeadReset #ctxEqCs solveEqC
+    , solveHead #ctxEqRowCs solveEqRowC
+    , solveFirst #ctxCondEqs solveConditional
+    , solveFirst #ctxSubTypeCs solveSubTypeC
+    , preprocess #ctxSubRowCs resolveCycles
+    , solveFirst #ctxSubRowCs solveSubRowC
     ]
 
 --------------------------------------------------------------------------------

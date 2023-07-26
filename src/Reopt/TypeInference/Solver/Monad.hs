@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Reopt.TypeInference.Solver.Monad (
@@ -42,10 +43,10 @@ module Reopt.TypeInference.Solver.Monad (
   withFresh,
 ) where
 
-import Control.Lens (Lens', use, (%%=), (%=), (.=), (<<+=))
+import Control.Lens (Lens', use, (%%=), (%=), (<<+=))
 import Control.Monad.State (MonadState, State, evalState)
 import Data.Foldable (asum)
-import Data.Generics.Product (field)
+import Data.Generics.Labels ()
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import GHC.Generics (Generic)
@@ -133,7 +134,7 @@ runSolverM b o w = flip evalState (emptyContext w b o) . getSolverM
 -- Adding constraints
 
 addEqC :: EqC -> SolverM ()
-addEqC eqc = field @"ctxEqCs" %= (eqc :)
+addEqC eqc = #ctxEqCs %= (eqc :)
 
 addTyVarEq :: ConstraintProvenance -> TyVar -> ITy -> SolverM ()
 addTyVarEq prov tv1 tv2 = addEqC (EqC tv1 tv2 prov)
@@ -142,20 +143,20 @@ addTyVarEq' :: ConstraintProvenance -> TyVar -> TyVar -> SolverM ()
 addTyVarEq' prov tv1 tv2 = addTyVarEq prov tv1 (VarTy tv2)
 
 addEqRowC :: EqRowC -> SolverM ()
-addEqRowC eqc = field @"ctxEqRowCs" %= (eqc :)
+addEqRowC eqc = #ctxEqRowCs %= (eqc :)
 
 addRowExprEq :: RowExpr -> RowExpr -> SolverM ()
 addRowExprEq r1 r2 = addEqRowC (EqRowC r1 r2)
 
 addCondEq :: Conditional' -> SolverM ()
 addCondEq cs =
-  field @"ctxCondEqs" %= (cs :)
+  #ctxCondEqs %= (cs :)
 
 addSubType :: TyVar -> TyVar -> SolverM ()
-addSubType a b = field @"ctxSubTypeCs" %= ((a :<: b) :)
+addSubType a b = #ctxSubTypeCs %= ((a :<: b) :)
 
 addSubRow :: RowExpr -> RowExpr -> SolverM ()
-addSubRow a b = field @"ctxSubRowCs" %= ((a :<: b) :)
+addSubRow a b = #ctxSubRowCs %= ((a :<: b) :)
 
 --------------------------------------------------------------------------------
 -- Getting constraints
@@ -167,19 +168,19 @@ popField fld =
     (c : cs) -> (Just c, cs)
 
 _dequeueEqC :: SolverM (Maybe EqC)
-_dequeueEqC = popField (field @"ctxEqCs")
+_dequeueEqC = popField #ctxEqCs
 
 _dequeueEqRowC :: SolverM (Maybe EqRowC)
-_dequeueEqRowC = popField (field @"ctxEqRowCs")
+_dequeueEqRowC = popField #ctxEqRowCs
 
 _dequeueSubTypeC :: SolverM (Maybe SubTypeC)
-_dequeueSubTypeC = popField (field @"ctxSubTypeCs")
+_dequeueSubTypeC = popField #ctxSubTypeCs
 
 --------------------------------------------------------------------------------
 -- Operations over type variable state
 
 freshRowVar :: SolverM RowVar
-freshRowVar = RowVar <$> (field @"nextRowVar" <<+= 1)
+freshRowVar = RowVar <$> (#nextRowVar <<+= 1)
 
 _freshRowVarE :: RowExpr -> SolverM RowVar
 _freshRowVarE e = do
@@ -197,20 +198,20 @@ freshRowVarFM fm = do
 -- for @leaf@.  Note that both root and leaf should be the reps. of
 -- their corresponding equivalence classes.
 unsafeUnifyRowVars :: RowExpr -> RowVar -> SolverM ()
-unsafeUnifyRowVars root leaf = field @"ctxRowVars" %= UM.unify ki leaf
+unsafeUnifyRowVars root leaf = #ctxRowVars %= UM.unify ki leaf
  where
   ki = RowInfo{riShift = rowExprShift root, riRowVar = rowExprVar root}
 
 -- | Always define a row variable, even if it has a def.
 defineRowVar :: RowVar -> FieldMap TyVar -> SolverM ()
-defineRowVar rowv fm = field @"ctxRowVars" %= UM.insert rowv fm
+defineRowVar rowv fm = #ctxRowVars %= UM.insert rowv fm
 
 undefineRowVar :: RowVar -> SolverM ()
-undefineRowVar rv = field @"ctxRowVars" %= UM.delete rv
+undefineRowVar rv = #ctxRowVars %= UM.delete rv
 
 lookupRowVarRep :: RowVar -> SolverM (Offset, RowVar)
 lookupRowVarRep rv = do
-  ri <- field @"ctxRowVars" %%= UM.lookupRep rv
+  ri <- #ctxRowVars %%= UM.lookupRep rv
   pure (riShift ri, riRowVar ri)
 
 lookupRowExprRep :: RowExpr -> SolverM RowExpr
@@ -221,7 +222,7 @@ lookupRowExprRep re = do
 
 lookupRowVar :: RowVar -> SolverM (Offset, RowVar, Maybe (FieldMap TyVar))
 lookupRowVar rv = do
-  (ri, fm) <- field @"ctxRowVars" %%= UM.lookup rv
+  (ri, fm) <- #ctxRowVars %%= UM.lookup rv
   pure (riShift ri, riRowVar ri, fm)
 
 lookupRowExpr :: RowExpr -> SolverM (RowExpr, Maybe (FieldMap TyVar))
@@ -234,17 +235,17 @@ lookupRowExpr re = do
 -- corresponding equivalence class.  This also updates the eqv. map to
 -- amortise lookups.
 lookupTyVarRep :: TyVar -> SolverM TyVar
-lookupTyVarRep tv0 = field @"ctxTyVars" %%= UM.lookupRep tv0
+lookupTyVarRep tv0 = #ctxTyVars %%= UM.lookupRep tv0
 
 -- | Lookup a type variable, returns the representative of the
 -- corresponding equivalence class, and the definition for that type
 -- var, if any.
 lookupTyVar :: TyVar -> SolverM (TyVar, Maybe ITy')
-lookupTyVar tv = field @"ctxTyVars" %%= UM.lookup tv
+lookupTyVar tv = #ctxTyVars %%= UM.lookup tv
 
 -- | Always return a new type variable.
 freshTyVar' :: Maybe String -> SolverM TyVar
-freshTyVar' orig = flip TyVar orig <$> (field @"nextTyVar" <<+= 1)
+freshTyVar' orig = flip TyVar orig <$> (#nextTyVar <<+= 1)
 
 freshTyVar :: Maybe String -> Maybe ITy -> SolverM TyVar
 freshTyVar orig Nothing = freshTyVar' orig
@@ -256,31 +257,28 @@ freshTyVar orig (Just (ITy ty)) = do
 
 -- | Always define a type variable, even if it has a def.
 defineTyVar :: TyVar -> ITy' -> SolverM ()
-defineTyVar tyv ty = field @"ctxTyVars" %= UM.insert tyv ty
+defineTyVar tyv ty = #ctxTyVars %= UM.insert tyv ty
 
 undefineTyVar :: TyVar -> SolverM ()
-undefineTyVar ty = field @"ctxTyVars" %= UM.delete ty
+undefineTyVar ty = #ctxTyVars %= UM.delete ty
 
 -- | @unsafeUnifyTyVars root leaf@ will make @root@ the new equiv. rep
 -- for @leaf@.  Note that both root and leaf should be the reps. of
 -- their corresponding equivalence classes.
 unsafeUnifyTyVars :: TyVar -> TyVar -> SolverM ()
-unsafeUnifyTyVars root leaf = field @"ctxTyVars" %= UM.unify root leaf
+unsafeUnifyTyVars root leaf = #ctxTyVars %= UM.unify root leaf
 
 --------------------------------------------------------------------------------
 -- Other stuff
 
 ptrWidthNumTy :: SolverM ITy'
-ptrWidthNumTy = NumTy <$> use (field @"ptrWidth")
-
-_setTraceUnification :: Bool -> SolverM ()
-_setTraceUnification b = field @"ctxTraceUnification" .= b
+ptrWidthNumTy = NumTy <$> use #ptrWidth
 
 traceUnification :: SolverM Bool
-traceUnification = use (field @"ctxTraceUnification")
+traceUnification = use #ctxTraceUnification
 
 traceConstraintOrigins :: SolverM Bool
-traceConstraintOrigins = use (field @"ctxTraceConstraintOrigins")
+traceConstraintOrigins = use #ctxTraceConstraintOrigins
 
 --------------------------------------------------------------------------------
 -- Conditional constraints

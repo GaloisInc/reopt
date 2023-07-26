@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Reopt.TypeInference.Solver.Finalise (
@@ -8,7 +9,7 @@ module Reopt.TypeInference.Solver.Finalise (
 import Control.Lens (over, _3)
 import Control.Monad.State (gets)
 import Data.Either (lefts, partitionEithers)
-import Data.Generics.Product (field)
+import Data.Generics.Labels ()
 import Data.Graph (SCC (..), flattenSCCs)
 import Data.Graph.SCC (stronglyConnCompR)
 import Data.Map.Strict (Map)
@@ -91,7 +92,7 @@ finalizeTypeDefs' ::
   UM.UnionFindMap RowVar ki (FieldMap TyVar) ->
   ConstraintSolution
 finalizeTypeDefs' um@(UM.UnionFindMap teqvs tdefs) (UM.UnionFindMap _reqvs rdefs) =
-  over (field @"csTyVars") (Map.union eqvRes) preSoln
+  over #csTyVars (Map.union eqvRes) preSoln
  where
   -- Include equivalences.
   eqvRes = Map.fromSet mkOneEqv (Map.keysSet teqvs)
@@ -144,7 +145,7 @@ finaliseTyF ::
   ConstraintSolution ->
   ConstraintSolution
 finaliseTyF (ty, tv, _) r =
-  over (field @"csTyVars") (Map.insert tv (norm ty)) r
+  over #csTyVars (Map.insert tv (norm ty)) r
  where
   norm = \case
     PtrTy rv -> FTy (PtrTy (Map.findWithDefault (StructTy emptyFieldMap) rv (csRowVars r)))
@@ -159,7 +160,7 @@ finaliseFieldMap ::
   ConstraintSolution ->
   ConstraintSolution
 finaliseFieldMap (fm, rv, _) r =
-  over (field @"csRowVars") (Map.insert rv (StructTy (norm <$> fm))) r
+  over #csRowVars (Map.insert rv (StructTy (norm <$> fm))) r
  where
   norm t = Map.findWithDefault UnknownTy t (csTyVars r)
 
@@ -179,7 +180,7 @@ finaliseCyclic cs s
       --              [ PP.pretty n PP.<+> "=" PP.<+> PP.pretty ty
       --              | (ty, n, _) <- cs
       --              ])) $
-      over (field @"csNamedStructs") (namedDefs ++) sWithTys
+      over #csNamedStructs (namedDefs ++) sWithTys
  where
   namedDefs =
     [ (rowVarToStructName rv, StructTy $ resolveOne <$> fm)
@@ -190,7 +191,7 @@ finaliseCyclic cs s
   -- them.
   sWithTys = foldl (flip finaliseTyF) sWithNamed tys'
 
-  sWithNamed = over (field @"csRowVars") (Map.union named) s
+  sWithNamed = over #csRowVars (Map.union named) s
 
   named =
     Map.fromList
