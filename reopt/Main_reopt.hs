@@ -1,26 +1,23 @@
+{-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Main (main) where
 
-import Paths_reopt (version)
-
 import Control.Exception (catch)
-import Control.Lens (
-  Lens',
-  lens,
-  (%~),
-  (&),
-  (.~),
-  (^.),
-  (^..),
- )
-import Control.Monad
+import Control.Lens (Lens', (^.), (^..))
+import Control.Monad (foldM, forM_, unless, when)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Encoding qualified as AE
 import Data.ByteString qualified as BS
 import Data.ByteString.Builder qualified as Builder
 import Data.ByteString.Char8 qualified as BSC
 import Data.Either (rights)
+import Data.ElfEdit (
+  ElfSection (elfSectionAddr, elfSectionData, elfSectionName),
+  elfSections,
+ )
+import Data.ElfEdit qualified as Elf
+import Data.Generics.Labels ()
 import Data.IORef (
   IORef,
   modifyIORef',
@@ -33,30 +30,6 @@ import Data.List (
   stripPrefix,
   (\\),
  )
-import Data.Maybe (fromMaybe, isJust, isNothing)
-import Data.Text qualified as T
-import Data.Version (Version (versionBranch))
-import Data.Word (Word64)
-import Numeric (readHex)
-import Prettyprinter qualified as PP
-import Prettyprinter.Render.Text qualified as PP
-import System.Console.CmdArgs.Explicit
-import System.Environment (getArgs)
-import System.Exit (exitFailure)
-import System.FilePath (splitFileName)
-import System.IO qualified as IO
-import System.IO.Error (
-  ioeGetErrorString,
-  ioeGetErrorType,
-  isUserError,
- )
-import Text.Printf (printf)
-
-import Data.ElfEdit (
-  ElfSection (elfSectionAddr, elfSectionData, elfSectionName),
-  elfSections,
- )
-import Data.ElfEdit qualified as Elf
 import Data.Macaw.Analysis.RegisterUse (
   ppRegisterUseErrorReason,
   ruReason,
@@ -64,11 +37,25 @@ import Data.Macaw.Analysis.RegisterUse (
 import Data.Macaw.DebugLogging
 import Data.Macaw.Discovery (
   DiscoveryOptions (..),
+  defaultDiscoveryOptions,
   memory,
   ppDiscoveryStateBlocks,
  )
+import Data.Maybe (
+  fromMaybe,
+  isJust,
+  isNothing,
+ )
 import Data.Parameterized.Some (Some (Some))
-
+import Data.Text qualified as T
+import Data.Version (Version (versionBranch))
+import Data.Word (Word64)
+import GHC.Generics (Generic)
+import Numeric (readHex)
+import Options.Applicative
+import Paths_reopt (version)
+import Prettyprinter qualified as PP
+import Prettyprinter.Render.Text qualified as PP
 import Reopt
 import Reopt.CFG.FnRep.X86 ()
 import Reopt.ELFArchInfo (getElfArchInfo)
@@ -104,10 +91,24 @@ import Reopt.Utils.Exit (
   handleExceptTWithExit,
  )
 import Reopt.VCG.Annotations as Ann (ModuleAnnotations (..))
-import Reopt.X86 (X86OS, osArchitectureInfo, osLinkName, osPersonality)
+import Reopt.X86 (
+  X86OS,
+  osArchitectureInfo,
+  osLinkName,
+  osPersonality,
+ )
+import System.Exit (exitFailure)
+import System.FilePath (splitFileName)
+import System.IO qualified as IO
+import System.IO.Error (
+  ioeGetErrorString,
+  ioeGetErrorType,
+  isUserError,
+ )
+import Text.Printf (printf)
 
 reoptVersion :: String
-reoptVersion = printf "Reopt binary reoptimizer (reopt) %s." v
+reoptVersion = printf "Reopt binary reoptimizer (reopt) %s" v
  where
   v = intercalate "." $ map (printf "%d") $ versionBranch version
 
@@ -120,7 +121,7 @@ writeOutput (Just nm) f = IO.withBinaryFile nm IO.WriteMode f
 -- Utilities
 
 unintercalate :: String -> String -> [String]
-unintercalate punct str = reverse $ go [] "" str
+unintercalate punct = reverse . go [] ""
  where
   go acc "" [] = acc
   go acc thisAcc [] = reverse thisAcc : acc
@@ -134,21 +135,19 @@ unintercalate punct str = reverse $ go [] "" str
 -- | Action to perform when running
 data Action
   = -- | Print out disassembler output only.
-    DumpDisassembly
+    DumpDisassembly FilePath
   | -- | Print out control-flow microcode.
-    ShowCFG
+    ShowCFG FilePath
   | -- | Print out generated constraints
-    ShowConstraints
+    ShowConstraints FilePath
   | -- | Start reopt in server mode
     ServerMode
-  | -- | Print out help message
-    ShowHelp
   | -- | Print out help message
     ShowHomeDirectory
   | -- | Print out version
     ShowVersion
   | -- | Perform a full reoptimization
-    Reopt
+    Reopt FilePath
   deriving (Show)
 
 ------------------------------------------------------------------------
@@ -156,13 +155,10 @@ data Action
 
 -- | Command line arguments.
 data Args = Args
-  { _reoptAction :: !Action
-  , programPath :: !FilePath
-  -- ^ Path to input program to optimize/export
-  , _debugKeys :: [DebugClass]
-  , -- Debug information ^ TODO: See if we can omit this.
-
-    outputPath :: !(Maybe FilePath)
+  { reoptAction :: !Action
+  , debugKeys :: [DebugClass]
+  -- ^ Debug information TODO: See if we can omit this.
+  , outputPath :: !(Maybe FilePath)
   -- ^ Path to output
   , headerPath :: !(Maybe FilePath)
   -- ^ Filepath for C header file that helps provide
@@ -200,7 +196,7 @@ data Args = Args
   -- ^ List of function entry points that we exclude for translation.
   , loadBaseAddress :: !(Maybe Word64)
   -- ^ Address to load binary at if relocatable.
-  , _discOpts :: !DiscoveryOptions
+  , discOpts :: !DiscoveryOptions
   -- ^ Options affecting discovery
   , unnamedFunPrefix :: !BS.ByteString
   -- ^ Prefix for unnamed functions identified in code discovery.
@@ -237,26 +233,14 @@ data Args = Args
   , traceConstraintOrigins :: Bool
   -- ^ Trace the origin of constraints in the type inference solver
   }
-
--- | Action to perform when running
-reoptAction :: Lens' Args Action
-reoptAction = lens _reoptAction (\s v -> s{_reoptAction = v})
-
--- | Which debug keys (if any) to output
-debugKeys :: Lens' Args [DebugClass]
-debugKeys = lens _debugKeys (\s v -> s{_debugKeys = v})
-
--- | Options for controlling discovery
-discOpts :: Lens' Args DiscoveryOptions
-discOpts = lens _discOpts (\s v -> s{_discOpts = v})
+  deriving (Generic)
 
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
 defaultArgs =
   Args
-    { _reoptAction = Reopt
-    , programPath = ""
-    , _debugKeys = []
+    { reoptAction = Reopt ""
+    , debugKeys = []
     , outputPath = Nothing
     , headerPath = Nothing
     , llvmVersion = latestLLVMConfig
@@ -269,7 +253,7 @@ defaultArgs =
     , includeAddrs = []
     , excludeAddrs = []
     , loadBaseAddress = Nothing
-    , _discOpts = reoptDefaultDiscoveryOptions
+    , discOpts = reoptDefaultDiscoveryOptions
     , invariantsExportPath = Nothing
     , unnamedFunPrefix = "reopt"
     , eventsExportPath = Nothing
@@ -300,103 +284,76 @@ resolveHex ('0' : x : wval)
       Just $! fromInteger w
 resolveHex _ = Nothing
 
--- | Define a flag that tells reopt to load the binary at a particular
--- base address.
+-- | Define a flag that tells reopt to load the binary at a particular base
+-- address.
 --
 -- Primarily used for loading shared libraries at a fixed address.
-loadBaseAddressFlag :: Flag Args
-loadBaseAddressFlag = flagReq ["load-at-addr"] upd "OFFSET" help
+loadBaseAddressP :: Parser Word64
+loadBaseAddressP =
+  option (eitherReader validate) $
+    long "load-at-addr"
+      <> metavar "OFFSET"
+      <> help "Load a relocatable file at the given base address"
  where
-  help = "Load a relocatable file at the given base address."
-  upd :: String -> Args -> Either String Args
-  upd val args =
-    case resolveHex val of
-      Just off ->
-        Right $ args{loadBaseAddress = Just off}
-      Nothing ->
-        Left $ printf "Expected a hexadecimal address of form '0x???', passed %s." val
+  validate :: String -> Either String Word64
+  validate s =
+    maybe
+      (Left $ printf "Expected a hexadecimal address of form '0x???', passed %s" s)
+      return
+      $ resolveHex s
 
 ------------------------------------------------------------------------
 -- Other Flags
 
-disassembleFlag :: Flag Args
-disassembleFlag = flagNone ["disassemble", "d"] upd help
- where
-  upd = reoptAction .~ DumpDisassembly
-  help = "Show raw disassembler output."
+performRecoveryP :: Parser Bool
+performRecoveryP =
+  switch $
+    long "recover"
+      <> help "Perform recovery regardless of other options"
 
-cfgFlag :: Flag Args
-cfgFlag = flagNone ["c", "cfg"] upd help
- where
-  upd = reoptAction .~ ShowCFG
-  help = "Show recovered control-flow graphs."
+traceTypeUnificationP :: Parser Bool
+traceTypeUnificationP =
+  switch $
+    long "trace-unification"
+      <> help "Trace unification in the type inference engine"
 
-constraintsFlag :: Flag Args
-constraintsFlag = flagNone ["C", "constraints"] upd help
- where
-  upd = reoptAction .~ ShowConstraints
-  help = "Show recovered control-flow type constraints."
+traceConstraintOriginsP :: Parser Bool
+traceConstraintOriginsP =
+  switch $
+    long "trace-constraint-origins"
+      <> help "Trace the origins of constraints in the type inference engine"
 
-performRecoveryFlag :: Flag Args
-performRecoveryFlag = flagNone ["recover"] upd help
- where
-  upd s = s{performRecovery = True}
-  help = "Perform recovery regardless of other options."
+outputPathP :: Parser String
+outputPathP =
+  strOption $
+    short 'o'
+      <> long "output"
+      <> metavar "PATH"
+      <> help "Path to write output executable"
 
-traceTypeUnificationFlag :: Flag Args
-traceTypeUnificationFlag = flagNone ["trace-unification"] upd help
- where
-  upd s = s{traceTypeUnification = True}
-  help = "Trace unification in the type inference engine"
+headerPathP :: Parser String
+headerPathP =
+  strOption $
+    long "header"
+      <> metavar "PATH"
+      <> help "Optional header with function declarations"
 
-traceConstraintOriginsFlag :: Flag Args
-traceConstraintOriginsFlag = flagNone ["trace-constraint-origins"] upd help
+llvmVersionP :: Parser LLVMConfig
+llvmVersionP =
+  option (eitherReader validate) $
+    long "llvm-version"
+      <> value latestLLVMConfig
+      <> metavar "VERSION"
+      <> help "LLVM version (e.g. 3.5.2)"
  where
-  upd s = s{traceConstraintOrigins = True}
-  help = "Trace the origins of constraints in the type inference engine"
-
-showHomeDirFlag :: Flag Args
-showHomeDirFlag = flagNone ["home-dir"] upd help
- where
-  upd = reoptAction .~ ShowHomeDirectory
-  help =
-    "Display the directory reopt uses to cache info"
-      ++ " (customizable via the environment variable "
-      ++ reoptHomeDirEnvVar
-      ++ ")."
-
-serverModeFlag :: Flag Args
-serverModeFlag = flagNone ["server"] upd help
- where
-  upd = reoptAction .~ ServerMode
-  help = "Run reopt in server mode."
-
-outputFlag :: Flag Args
-outputFlag = flagReq ["o", "output"] upd "PATH" help
- where
-  upd s old = Right $ old{outputPath = Just s}
-  help = "Path to write output."
-
-headerFlag :: Flag Args
-headerFlag = flagReq ["header"] upd "PATH" help
- where
-  upd s old = Right $ old{headerPath = Just s}
-  help = "Optional header with function declarations."
-
-llvmVersionFlag :: Flag Args
-llvmVersionFlag = flagReq ["llvm-version"] upd "VERSION" help
- where
-  upd :: String -> Args -> Either String Args
-  upd s old = do
+  validate :: String -> Either String LLVMConfig
+  validate s = do
     v <- case versionOfString s of
       Just v -> Right v
-      Nothing -> Left "Could not interpret LLVM version."
-    cfg <- case getLLVMConfig v of
+      Nothing -> Left "Could not interpret LLVM version"
+    case getLLVMConfig v of
       Just c -> pure c
-      Nothing -> Left $ printf "Unsupported LLVM version %s." s
-    pure $ old{llvmVersion = cfg}
-
-  help = "LLVM version (e.g. 3.5.2)"
+      Nothing -> Left $ printf "Unsupported LLVM version %s" s
 
 parseDebugFlags :: [DebugClass] -> String -> Either String [DebugClass]
 parseDebugFlags oldKeys cl =
@@ -409,301 +366,302 @@ parseDebugFlags oldKeys cl =
       return (nub $ oldKeys ++ ks)
  where
   getKeys "all" = Right allDebugKeys
-  getKeys str = case parseDebugKey str of
-    Nothing -> Left $ "Unknown debug key `" ++ str ++ "'"
+  getKeys s = case parseDebugKey s of
+    Nothing -> Left $ "Unknown debug key `" ++ s ++ "'"
     Just k -> Right [k]
 
-debugFlag :: Flag Args
-debugFlag = flagOpt "all" ["debug", "D"] upd "FLAGS" help
+debugKeysP :: Parser [DebugClass]
+debugKeysP =
+  option (eitherReader validate) $
+    long "debug"
+      <> short 'D'
+      <> metavar "FLAGS"
+      <> value []
+      <> showDefault
+      <> help
+        ( "Debug keys to enable.  This flag may be used multiple times, "
+            ++ "with comma-separated keys.  Keys may be preceded by a '-' which "
+            ++ "means disable that key.\n"
+            ++ "Supported keys: all, "
+            ++ intercalate ", " (map debugKeyName allDebugKeys)
+        )
  where
-  upd s old = do
+  validate s = do
     let ks = unintercalate "," s
-    new <- foldM parseDebugFlags (old ^. debugKeys) ks
-    Right $ (debugKeys .~ new) old
-  help =
-    "Debug keys to enable.  This flag may be used multiple times, "
-      ++ "with comma-separated keys.  Keys may be preceded by a '-' which "
-      ++ "means disable that key.\n"
-      ++ "Supported keys: all, "
-      ++ intercalate ", " (map debugKeyName allDebugKeys)
+    foldM parseDebugFlags [] ks
 
--- | Defines a flag to update a file path to an executable with a
--- default.
-pathFlag ::
+-- | Defines a flag to update a file path to an executable with a default.
+pathP ::
   -- | Command name and flag name
   String ->
-  -- | Lens for reading and writng
-  Lens' Args FilePath ->
-  Flag Args
-pathFlag nm l = flagReq [nm] upd "PATH" help
+  -- | Lens to the field in `Args`
+  Lens' Args String ->
+  Parser String
+pathP name l =
+  strOption $
+    long name
+      <> value (defaultArgs ^. l)
+      <> showDefault
+      <> metavar "PATH"
+      <> help ("Path to " <> name)
+
+-- | Parser to set clang path.
+clangPathP :: Parser String
+clangPathP = pathP "clang" #clangPath
+
+-- | Parser to set llc path.
+llcPathP :: Parser String
+llcPathP = pathP "llc" #llcPath
+
+-- | Parser to set path to opt.
+optPathP :: Parser String
+optPathP = pathP "opt" #optPath
+
+-- | Parser to set llc optimization level.
+optLevelP :: Parser Int
+optLevelP =
+  option (eitherReader validate) $
+    short 'O'
+      <> long "opt-level"
+      <> metavar "PATH"
+      <> value (defaultArgs ^. #optLevel)
+      <> showDefault
+      <> help "Optimization level"
  where
-  upd s old = Right $ old & l .~ s
-  help = printf "Path to %s (default %s)" (show nm) (show (defaultArgs ^. l))
-
--- | Flag to set clang path.
-clangPathFlag :: Flag Args
-clangPathFlag = pathFlag "clang" (lens clangPath (\s v -> s{clangPath = v}))
-
--- | Flag to set llc path.
-llcPathFlag :: Flag Args
-llcPathFlag = pathFlag "llc" (lens llcPath (\s v -> s{llcPath = v}))
-
--- | Flag to set path to opt.
-optPathFlag :: Flag Args
-optPathFlag = pathFlag "opt" (lens optPath (\s v -> s{optPath = v}))
-
--- | Flag to set llc optimization level.
-optLevelFlag :: Flag Args
-optLevelFlag = flagReq ["O", "opt-level"] upd "PATH" help
- where
-  upd s old =
+  validate s =
     case reads s of
-      [(lvl, "")] | 0 <= lvl && lvl <= 3 -> Right $ old{optLevel = lvl}
-      _ -> Left "Expected optimization level to be a number between 0 and 3."
-  help = "Optimization level."
+      [(lvl, "")] | 0 <= lvl && lvl <= 3 -> Right lvl
+      _ -> Left "Expected optimization level to be a number between 0 and 3"
 
--- | Flag to set path to OCCAM slash
-slashPathFlag :: Flag Args
-slashPathFlag = pathFlag "slash" (lens slashPath (\s v -> s{slashPath = v}))
+-- | Parser to set path to OCCAM slash
+slashPathP :: Parser String
+slashPathP = pathP "slash" #slashPath
 
--- | Flag to set path to llvm-mc
-llvmMcPathFlag :: Flag Args
-llvmMcPathFlag = pathFlag "llvm-mc" (lens llvmMcPath (\s v -> s{llvmMcPath = v}))
-
--- | Used to add a new function to ignore translation of.
-includeAddrFlag :: Flag Args
-includeAddrFlag = flagReq ["include"] upd "ADDR" help
- where
-  upd s old = Right $ old{includeAddrs = words s ++ includeAddrs old}
-  help = "Address of function to include in analysis (may be repeated)."
+-- | Parser to set path to llvm-mc
+llvmMcPathP :: Parser String
+llvmMcPathP = pathP "llvm-mc" #llvmMcPath
 
 -- | Used to add a new function to ignore translation of.
-excludeAddrFlag :: Flag Args
-excludeAddrFlag = flagReq ["exclude"] upd "ADDR" help
- where
-  upd s old = Right $ old{excludeAddrs = words s ++ excludeAddrs old}
-  help = "Address of function to exclude in analysis (may be repeated)."
+includeAddrP :: Parser String
+includeAddrP =
+  strOption
+    ( long "include"
+        <> metavar "ADDR"
+        <> help "Address of function to include in analysis (may be repeated)"
+    )
+
+-- | Used to add a new function to ignore translation of.
+excludeAddrP :: Parser String
+excludeAddrP =
+  strOption
+    ( long "exclude"
+        <> metavar "ADDR"
+        <> help
+          "Address of function to exclude in analysis (may be repeated)"
+    )
 
 -- | Used to add a path at which to search for dynamic dependencies.
-dynDepPathFlag :: Flag Args
-dynDepPathFlag = flagReq ["lib-dir"] upd "PATH" help
- where
-  upd path args = Right $ args{dynDepPath = path : dynDepPath args}
-  help = "Additional location to search for dynamic dependencies."
+dynDepPathP :: Parser String
+dynDepPathP =
+  strOption $
+    long "lib-dir"
+      <> metavar "PATH"
+      <> help
+        "Additional location to search for dynamic dependencies"
 
 -- | Used to add a path at which to search for dynamic dependencies.
-dynDepDebugPathFlag :: Flag Args
-dynDepDebugPathFlag = flagReq ["debug-dir"] upd "PATH" help
- where
-  upd path args = Right $ args{dynDepDebugPath = path : dynDepDebugPath args}
-  help = "Additional location to search for dynamic dependencies' debug info."
+dynDepDebugPathP :: Parser String
+dynDepDebugPathP =
+  strOption $
+    long "debug-dir"
+      <> metavar "PATH"
+      <> help
+        "Additional location to search for dynamic dependencies' debug info"
 
 -- | Print out a trace message when we analyze a function
-logAtAnalyzeFunctionFlag :: Flag Args
-logAtAnalyzeFunctionFlag = flagBool ["trace-function-discovery"] upd help
- where
-  upd b = discOpts %~ \o -> o{logAtAnalyzeFunction = b}
-  help = "Report when starting analysis of each function."
+logAtAnalyzeFunctionP :: Parser Bool
+logAtAnalyzeFunctionP =
+  switch $
+    long "trace-function-discovery"
+      <> help
+        "Report when starting analysis of each function"
 
 -- | Print out a trace message when we analyze a function
-logAtAnalyzeBlockFlag :: Flag Args
-logAtAnalyzeBlockFlag = flagBool ["trace-block-discovery"] upd help
- where
-  upd b = discOpts %~ \o -> o{logAtAnalyzeBlock = b}
-  help = "Report when starting analysis of each basic block with a function."
+logAtAnalyzeBlockP :: Parser Bool
+logAtAnalyzeBlockP =
+  switch $
+    long "trace-block-discovery"
+      <> help
+        "Report when starting analysis of each basic block with a function"
 
-exploreCodeAddrInMemFlag :: Flag Args
-exploreCodeAddrInMemFlag = flagBool ["include-mem"] upd help
- where
-  upd b = discOpts %~ \o -> o{exploreCodeAddrInMem = b}
-  help = "Include memory code addresses in discovery."
+exploreCodeAddrInMemP :: Parser Bool
+exploreCodeAddrInMemP =
+  switch $
+    long "include-mem"
+      <> help
+        "Include memory code addresses in discovery"
 
--- | This flag if set allows the LLVM generator to treat
--- trigger a undefined-behavior in cases like instructions
--- throwing exceptions or errors.
-allowLLVMUB :: Flag Args
-allowLLVMUB = flagBool ["allow-undef-llvm"] upd help
- where
-  upd b s = s{llvmGenOptions = LLVMGenOptions{mcExceptionIsUB = b}}
-  help = "Generate LLVM instead of inline assembly even when LLVM may result in undefined behavior."
+-- | If set, allows the LLVM generator to trigger some undefined behavior in
+-- cases like instructions throwing exceptions or errors.
+allowLLVMUBP :: Parser Bool
+allowLLVMUBP =
+  switch $
+    long "allow-undef-llvm"
+      <> help
+        "Generate LLVM instead of inline assembly even when LLVM may result in undefined behavior"
 
 -- | Generate an export flag
-exportFlag ::
-  -- | Flag name
+exportP ::
+  -- | Parser name
   String ->
   -- | Name for help
   String ->
-  -- | Setter
-  (Args -> Maybe FilePath -> Args) ->
-  Flag Args
-exportFlag flagName helpName setter =
-  flagReq [flagName] upd "PATH" help
- where
-  upd s old = Right $ setter old (Just s)
-  help = printf "Where to export %s." helpName
+  Parser String
+exportP flagName helpName =
+  strOption $
+    long flagName
+      <> metavar "PATH"
+      <> help
+        (printf "Where to export %s" helpName)
 
 -- | Path to export invariants to
-invariantsExportFlag :: Flag Args
-invariantsExportFlag = exportFlag "invariants" "Reopt invariants" upd
- where
-  upd s v = s{invariantsExportPath = v}
+invariantsExportP :: Parser String
+invariantsExportP = exportP "invariants" "Reopt invariants"
 
--- | Path to log events to.
-eventsExportFlag :: Flag Args
-eventsExportFlag = exportFlag "export-events" "Reopt events" upd
- where
-  upd s v = s{eventsExportPath = v}
+-- | Path to log events to
+eventsExportP :: Parser String
+eventsExportP = exportP "export-events" "Reopt events"
 
--- | Path to write LLVM annotations to.
-annotationsExportFlag :: Flag Args
-annotationsExportFlag = exportFlag "annotations" "reopt-vcg annotations" upd
- where
-  upd s v = s{annotationsExportPath = v}
+-- | Path to write LLVM annotations to
+annotationsExportP :: Parser String
+annotationsExportP = exportP "annotations" "reopt-vcg annotations"
 
 -- | Path to export CFG
-cfgExportFlag :: Flag Args
-cfgExportFlag = exportFlag "export-cfg" "CFG file" upd
- where
-  upd s v = s{cfgExportPath = v}
+cfgExportP :: Parser String
+cfgExportP = exportP "export-cfg" "CFG file"
 
 -- | Path to export functions to.
-fnsExportFlag :: Flag Args
-fnsExportFlag = exportFlag "export-fns" "functions file" upd
- where
-  upd s v = s{fnsExportPath = v}
+fnsExportP :: Parser String
+fnsExportP = exportP "export-fns" "functions file"
 
 -- | Path to export typed functions to.
-typedFnsExportFlag :: Flag Args
-typedFnsExportFlag = exportFlag "export-typed-fns" "functions file" upd
- where
-  upd s v = s{typedFnsExportPath = v}
+typedFnsExportP :: Parser String
+typedFnsExportP = exportP "export-typed-fns" "functions file"
 
 -- | Path to export LLVM to
-llvmExportFlag :: Flag Args
-llvmExportFlag = exportFlag "export-llvm" "LLVM" upd
- where
-  upd s v = s{llvmExportPath = v}
+llvmExportP :: Parser String
+llvmExportP = exportP "export-llvm" "LLVM"
 
 -- | Path to export object file to.
-objectExportFlag :: Flag Args
-objectExportFlag = exportFlag "export-object" "object file" upd
- where
-  upd s v = s{objectExportPath = v}
+objectExportP :: Parser String
+objectExportP = exportP "export-object" "object file"
 
 -- | Path to write LLVM annotations to.
-relinkerInfoExportFlag :: Flag Args
-relinkerInfoExportFlag = exportFlag "relinker-info" "relinker relationships" upd
- where
-  upd s v = s{relinkerInfoExportPath = v}
+relinkerInfoExportP :: Parser String
+relinkerInfoExportP = exportP "relinker-info" "relinker relationships"
 
--- | Flag to enable OCCAM (with default config if not accompanied by the `occam-config` flag).
-occamFlag :: Flag Args
-occamFlag =
-  flagReq ["occam"] upd "PATH" help
- where
-  upd path cfg = Right $ cfg{occamConfigPath = Just path}
-  help = printf "Enables OCCAM as reopt's optimizer using the manifest at PATH."
+-- | Parser to enable OCCAM (with default config if not accompanied by the `occam-config` flag).
+occamConfigPathP :: Parser String
+occamConfigPathP =
+  strOption $
+    long "occam"
+      <> metavar "PATH"
+      <> help "Enables OCCAM as reopt's optimizer using the manifest at PATH"
 
-arguments :: Mode Args
-arguments = mode "reopt" defaultArgs help filenameArg flags
- where
-  help = reoptVersion ++ "\n" ++ copyrightNotice
-  flags =
-    [ -- General purpose options
-      flagHelpSimple (reoptAction .~ ShowHelp)
-    , flagVersion (reoptAction .~ ShowVersion)
-    , debugFlag
-    , performRecoveryFlag
-    , traceTypeUnificationFlag
-    , traceConstraintOriginsFlag
-    , -- Output for final binary
-      outputFlag
-    , -- Output events
-      eventsExportFlag
-    , -- Explicit Modes
-      disassembleFlag
-    , cfgFlag
-    , constraintsFlag
-    , serverModeFlag
-    , showHomeDirFlag
-    , -- Discovery options
-      logAtAnalyzeFunctionFlag
-    , logAtAnalyzeBlockFlag
-    , exploreCodeAddrInMemFlag
-    , includeAddrFlag
-    , excludeAddrFlag
-    , -- Dependency options
-      dynDepPathFlag
-    , dynDepDebugPathFlag
-    , -- Function options
-      headerFlag
-    , -- Loading options
-      loadBaseAddressFlag
-    , -- Recovery options
-      invariantsExportFlag
-    , -- LLVM options
-      llvmVersionFlag
-    , annotationsExportFlag
-    , allowLLVMUB
-    , -- Command line programs
-      clangPathFlag
-    , llcPathFlag
-    , optPathFlag
-    , slashPathFlag
-    , llvmMcPathFlag
-    , -- Optimization
-      optLevelFlag
-    , occamFlag
-    , -- Export
-      cfgExportFlag
-    , fnsExportFlag
-    , typedFnsExportFlag
-    , llvmExportFlag
-    , objectExportFlag
-    , relinkerInfoExportFlag
-    ]
+command' :: String -> String -> Parser a -> Mod CommandFields a
+command' label description parser =
+  command label (info (parser <**> helper) (progDesc description))
 
--- | Flag to set the path to the binary to analyze.
-filenameArg :: Arg Args
-filenameArg =
-  Arg
-    { argValue = setFilename
-    , argType = "FILE"
-    , argRequire = False
-    }
- where
-  setFilename :: String -> Args -> Either String Args
-  setFilename nm a = Right (a{programPath = nm})
+commands :: [Mod CommandFields Action]
+commands =
+  [ command' "disassemble" "Show raw disassembler output" (DumpDisassembly <$> programPathP)
+  , command' "cfg" "Show recovered control-flow-graph" (ShowCFG <$> programPathP)
+  , command'
+      "constraints"
+      "Show recovered control-flow type constraints"
+      (ShowConstraints <$> programPathP)
+  , command'
+      "home-dir"
+      ( "Display the directory reopt uses to cache info"
+          <> " (customizable via the environment variable "
+          <> reoptHomeDirEnvVar
+          <> ")."
+      )
+      (pure ShowHomeDirectory)
+  , command' "reopt" "Run reopt" (Reopt <$> programPathP)
+  , command' "server" "Run in server mode" (pure ServerMode)
+  , command' "version" "Show version" (pure ShowVersion)
+  ]
+
+arguments :: Parser Args
+arguments =
+  Args
+    <$> (subparser (mconcat commands) <|> (Reopt <$> programPathP))
+    <*> debugKeysP
+    <*> optional outputPathP
+    <*> optional headerPathP
+    <*> clangPathP
+    <*> llvmVersionP
+    <*> llcPathP
+    <*> optPathP
+    <*> optLevelP
+    <*> slashPathP
+    <*> llvmMcPathP
+    <*> many includeAddrP
+    <*> many excludeAddrP
+    <*> optional loadBaseAddressP
+    <*> ( DiscoveryOptions
+            -- This was never exposed to the CLI
+            (exploreFunctionSymbols defaultDiscoveryOptions)
+            <$> exploreCodeAddrInMemP
+            <*> logAtAnalyzeFunctionP
+            <*> logAtAnalyzeBlockP
+        )
+    -- This was never exposed to the CLI
+    <*> pure (defaultArgs ^. #unnamedFunPrefix)
+    <*> ( LLVMGenOptions
+            <$> allowLLVMUBP
+        )
+    <*> optional eventsExportP
+    <*> optional annotationsExportP
+    <*> optional invariantsExportP
+    <*> optional cfgExportP
+    <*> optional fnsExportP
+    <*> optional typedFnsExportP
+    <*> optional llvmExportP
+    <*> optional objectExportP
+    <*> optional relinkerInfoExportP
+    <*> optional occamConfigPathP
+    <*> many dynDepPathP
+    <*> many dynDepDebugPathP
+    <*> performRecoveryP
+    <*> traceTypeUnificationP
+    <*> traceConstraintOriginsP
+
+-- | Parser to set the path to the binary to analyze.
+programPathP :: Parser String
+programPathP = strArgument $ metavar "PATH"
 
 displayError :: String -> IO ()
 displayError = IO.hPutStrLn IO.stderr
 
 getCommandLineArgs :: IO Args
-getCommandLineArgs = do
-  argStrings <- getArgs
-  case process arguments argStrings of
-    Left msg -> do
-      IO.hPutStrLn IO.stderr msg
-      exitFailure
-    Right v -> return v
+getCommandLineArgs = execParser (info (arguments <**> helper) fullDesc)
 
 -- | Print out the disassembly of all executable sections.
 --
 -- Note.  This does not apply relocations.
-dumpDisassembly :: Args -> IO ()
-dumpDisassembly args = do
-  when (null (programPath args)) $ do
-    IO.hPutStrLn IO.stderr "Missing program to disassemble"
-    exitFailure
-  bs <- checkedReadFile (programPath args)
-  hdr <- handleEitherStringWithExit $ parseElfHeaderInfo64 (programPath args) bs
+dumpDisassembly :: Args -> FilePath -> IO ()
+dumpDisassembly args elfPath = do
+  bs <- checkedReadFile elfPath
+  hdr <- handleEitherStringWithExit $ parseElfHeaderInfo64 elfPath bs
   let (l, e) = Elf.getElf hdr
   unless (null l) $ do
     displayError "Recoverable errors occurred in reading elf file:"
     mapM_ (IO.hPrint IO.stderr) l
   let sections = filter isCodeSection $ e ^.. elfSections
   when (null sections) $ do
-    displayError "Binary contains no executable sections."
+    displayError "Binary contains no executable sections"
     exitFailure
   writeOutput (outputPath args) $ \h -> do
     forM_ sections $ \s -> do
@@ -720,7 +678,7 @@ argsReoptOptions args = do
       { roIncluded = includeAddrs args
       , roExcluded = excludeAddrs args
       , roVerboseMode = True
-      , roDiscoveryOptions = args ^. discOpts
+      , roDiscoveryOptions = args ^. #discOpts
       , roDynDepPaths = dynDepPath args
       , roDynDepDebugPaths = dynDepDebugPath args ++ gdbDebugDirs
       , roTraceUnification = traceTypeUnification args
@@ -728,19 +686,14 @@ argsReoptOptions args = do
       }
 
 -- | Discovery symbols in program and show function CFGs.
-showCFG :: Args -> IO String
-showCFG args = do
-  when (null (programPath args)) $ do
-    displayError "Missing program to analyze."
-    exitFailure
-
-  let path = programPath args
+showCFG :: Args -> FilePath -> IO String
+showCFG args elfPath = do
   reoptOpts <- argsReoptOptions args
   Some hdrInfo <- do
-    bs <- checkedReadFile path
+    bs <- checkedReadFile elfPath
     case Elf.decodeElfHeaderInfo bs of
       Left (_, msg) -> do
-        displayError $ "Error reading " ++ path ++ ":"
+        displayError $ "Error reading " ++ elfPath ++ ":"
         displayError $ "  " ++ msg
         exitFailure
       Right (Elf.SomeElf hdr) ->
@@ -763,13 +716,9 @@ showCFG args = do
   handleEitherWithExit mr
 
 -- | Show the constraints generated by the type inference step.
-showConstraints :: Args -> IO ()
-showConstraints args = do
+showConstraints :: Args -> FilePath -> IO ()
+showConstraints args elfPath = do
   -- FIXME: copied from main performReopt command
-  let elfPath = programPath args
-  when (null (programPath args)) $ do
-    displayError "Missing program to analyze."
-    exitFailure
   origElf <- do
     bytes <- checkedReadFile elfPath
     handleEitherStringWithExit $ parseElfHeaderInfo64 elfPath bytes
@@ -845,25 +794,21 @@ collectInvariants ref evt = do
 
 -- | This command is called when reopt is called with no specific
 -- action.
-performReopt :: Args -> IO ()
-performReopt args = do
+performReopt :: Args -> FilePath -> IO ()
+performReopt args elfPath = do
   let somethingToDo = isJust (cfgExportPath args) || shouldRecover args
   unless somethingToDo $ do
     displayError $
       unlines
         [ "Nothing to do"
-        , "  Specify output via --output or other info to export."
+        , "  Specify output via --output or other info to export"
         ]
     exitFailure
 
   when (isJust (annotationsExportPath args) && isNothing (llvmExportPath args)) $ do
-    displayError "Using --annotations requires --export-llvm."
+    displayError "Using --annotations requires --export-llvm"
     exitFailure
 
-  let elfPath = programPath args
-  when (null (programPath args)) $ do
-    displayError "Missing program to analyze."
-    exitFailure
   origElf <- do
     bytes <- checkedReadFile elfPath
     handleEitherStringWithExit $ parseElfHeaderInfo64 elfPath bytes
@@ -992,7 +937,7 @@ performReopt args = do
                 vcgAnn =
                   Ann.ModuleAnnotations
                     { Ann.llvmFilePath = llvmPath
-                    , Ann.binFilePath = programPath args
+                    , Ann.binFilePath = elfPath
                     , Ann.pageSize = 4096
                     , Ann.stackGuardPageCount = 1
                     , Ann.functions = rights (snd <$> ann)
@@ -1004,7 +949,7 @@ performReopt args = do
     unless (shouldCompileLLVM args) $ reoptEndNow ()
 
     -- Generate object file
-    objContents <- generateObjectFile args os objLLVM
+    objContents <- generateObjectFile args elfPath os objLLVM
     case objectExportPath args of
       Nothing -> pure ()
       Just path -> reoptWriteStrictByteString ObjectFileType path objContents
@@ -1039,12 +984,13 @@ performReopt args = do
 reoptRunSlash ::
   -- | Arguments to run Slash
   Args ->
+  FilePath ->
   -- | Configuration information for OCCAM.
   FilePath ->
   -- | Bitcode to optimize and compile with OCCAM's slash
   Builder.Builder ->
   ReoptM arch r BS.ByteString
-reoptRunSlash args cfgPath llContents = do
+reoptRunSlash args elfPath cfgPath llContents = do
   res <- reoptIO $ BS.readFile cfgPath
   cfg <-
     case Aeson.eitherDecodeStrict res of
@@ -1054,7 +1000,7 @@ reoptRunSlash args cfgPath llContents = do
         pure c
 
   reoptInTempDirectory $ do
-    let (_, progName) = splitFileName $ programPath args
+    let (_, progName) = splitFileName elfPath
     -- Write input LLVM
     let inputPath = "input.ll"
     reoptWriteBuilder LlvmFileType inputPath llContents
@@ -1072,14 +1018,14 @@ reoptRunSlash args cfgPath llContents = do
         runSlash (slashPath args) manifestPath (T.unpack <$> occamSlashOptions cfg)
     reoptIO $ BS.readFile occamOutputPath
 
-generateObjectFile :: Args -> X86OS -> Builder.Builder -> ReoptM arch r BS.ByteString
-generateObjectFile args os objLLVM = do
+generateObjectFile :: Args -> FilePath -> X86OS -> Builder.Builder -> ReoptM arch r BS.ByteString
+generateObjectFile args elfPath os objLLVM = do
   optLLVM <-
     case occamConfigPath args of
       Nothing -> reoptIO $ handleExceptTWithExit $ do
         optimizeLLVM (optLevel args) (optPath args) objLLVM
       Just cfgPath -> do
-        reoptRunSlash args cfgPath objLLVM
+        reoptRunSlash args elfPath cfgPath objLLVM
   reoptIO $
     handleExceptTWithExit $
       compileLLVM (optLevel args) (llcPath args) (llvmMcPath args) (osLinkName os) optLLVM
@@ -1098,20 +1044,19 @@ displayConstraintsInformation moduleConstraints = do
 main' :: IO ()
 main' = do
   args <- getCommandLineArgs
-  setDebugKeys (args ^. debugKeys)
-  case args ^. reoptAction of
-    DumpDisassembly -> dumpDisassembly args
-    ShowCFG ->
+  setDebugKeys (args ^. #debugKeys)
+  case args ^. #reoptAction of
+    DumpDisassembly file -> dumpDisassembly args file
+    ShowCFG file ->
       writeOutput (outputPath args) $ \h -> do
-        IO.hPutStrLn h =<< showCFG args
-    ShowConstraints -> showConstraints args
+        IO.hPutStrLn h =<< showCFG args file
+    ShowConstraints file -> showConstraints args file
     ServerMode -> runServer
-    ShowHelp -> print $ helpText [] HelpFormatAll arguments
     ShowHomeDirectory -> do
       homeDir <- reoptHomeDir
       print $ "Reopt's current home directory: " ++ homeDir
-    ShowVersion -> putStrLn (modeHelp arguments)
-    Reopt -> performReopt args
+    ShowVersion -> putStrLn reoptVersion
+    Reopt file -> performReopt args file
 
 main :: IO ()
 main = main' `catch` h
