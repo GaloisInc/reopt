@@ -309,7 +309,7 @@ in the root directory.
 
 - We are trying to move to `optparse-applicative` for CLI argument parsing
 (though there remain some instances of `cmdargs` for executables we are not
-actively maitaining).
+actively maintaining).
 
 - We use `prettyprinter` for pretty-printing.
 
