@@ -285,10 +285,10 @@ Recovery:
 ## Improving recovery with debug information
 
 `reopt` and `reopt-explore` will try to determine if any debug information
-is available for dynamic dependencies by quiering `gdb` (if it is installed).
+is available for dynamic dependencies by querying `gdb` (if it is installed).
 
 Users can also manually specify dependency and debug directories to search in
-manually for both `reopt` and `reopt-explore` via the folowing flags:
+manually for both `reopt` and `reopt-explore` via the following flags:
 
 ```
 --lib-dir=PATH              Additional location to search for dynamic
@@ -296,3 +296,27 @@ manually for both `reopt` and `reopt-explore` via the folowing flags:
 --debug-dir=PATH            Additional location to search for dynamic
                             dependencies' debug info.
 ```
+
+## Contributing
+
+The project has been contributed to by many authors over many years without much
+coordination on code style and library usage.  For our currently-maintained
+sub-projects, we favor the following, without enforcing them aggressively (i.e.
+you may still find instances where those are not used):
+
+- We use the `fourmolu` code formatter, informed by the `fourmolu.yaml` present
+in the root directory.
+
+- We are trying to move to `optparse-applicative` for CLI argument parsing
+(though there remain some instances of `cmdargs` for executables we are not
+actively maintaining).
+
+- We use `prettyprinter` for pretty-printing.
+
+- We tend to use labeled generic lenses for accessing complex data types in
+read/write.  We still have a mixed use of named- and symbol-based lens
+operators.
+
+- We do not yet have a very nice logging story.  Currently, the code outputs to
+stdout/stderr as it deems necessary, but we ought to use a more principled
+logging discipline.
