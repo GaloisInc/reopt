@@ -338,6 +338,35 @@ ppFnEntry :: Maybe BS.ByteString -> MemSegmentOff w -> String
 ppFnEntry (Just nm) addr = BS.unpack nm <> "(" <> ppSegOff addr <> ")"
 ppFnEntry Nothing addr = ppSegOff addr
 
+-- | How much character space to spend on the herald, delimiters and spaces included
+heraldLength :: Int
+heraldLength = 11
+
+-- | Displays output with the wanted herald.  Currently would look something like:
+--
+--   [HERALD] THING
+withHerald :: String -> String -> IO ()
+withHerald herald = hPutStrLn stderr . (printf formatString ("[" <> heraldText <> "] ") <>)
+  where
+    -- NOTE: 3 accounts for '[' and '] '
+    heraldText = take (heraldLength - 3) herald
+    formatString = "%-" <> show heraldLength <> "s"
+
+logBeginOf :: String -> IO ()
+logBeginOf = withHerald "BEGIN"
+
+logEndOf :: String -> IO ()
+logEndOf = withHerald "END"
+
+logError :: String -> IO ()
+logError = withHerald "ERROR"
+
+logStep :: String -> IO ()
+logStep = withHerald "STEP"
+
+logWarning :: String -> IO ()
+logWarning = withHerald "WARNING"
+
 -- | Function for recovering log information.
 --
 -- This has a side effect where it increments an IORef so
@@ -348,17 +377,17 @@ printLogEvent ::
 printLogEvent event = do
   case event of
     ReoptGlobalStepStarted s ->
-      hPutStrLn stderr $ ppGlobalStep s
-    ReoptGlobalStepFinished _ _ ->
-      hPutStrLn stderr $ printf "  Complete."
+      logBeginOf $ ppGlobalStep s
+    ReoptGlobalStepFinished s _ ->
+      logEndOf $ ppGlobalStep s
     ReoptGlobalStepWarning _st msg ->
-      hPutStrLn stderr $ printf "  %s" msg
+      logWarning msg
     ReoptFunStepStarted s f ->
-      hPutStrLn stderr $ ppFunStep s ++ " " ++ ppFunId f
-    ReoptFunStepFinished{} ->
-      hPutStrLn stderr $ printf "  Complete."
+      logBeginOf $ printf "%s function %s" (ppFunStep s) (ppFunId f)
+    ReoptFunStepFinished s f _ ->
+      logEndOf $ printf "%s function %s" (ppFunStep s) (ppFunId f)
     ReoptFunStepFailed s _ e ->
-      hPutStrLn stderr $
+      logError $
         case s of
           Discovery ->
             unlines $
@@ -381,7 +410,7 @@ printLogEvent event = do
           AnnotationGeneration ->
             printf "  %s" e
     ReoptFunStepLog _st _f msg ->
-      hPutStrLn stderr $ printf "  %s" msg
+      logStep msg
     ReoptFunStepAllFinished _ _ ->
       pure ()
 
