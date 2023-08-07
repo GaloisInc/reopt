@@ -1,21 +1,25 @@
-module Reopt.Utils.Exit
-  ( handleEitherStringWithExit,
-    handleEitherWithExit,
-    handleExceptTStringWithExit,
-    handleExceptTWithExit,
-    runReoptInIO,
-    reportErrorAndExit,
-    checkedReadFile,
-  )
+module Reopt.Utils.Exit (
+  handleEitherStringWithExit,
+  handleEitherWithExit,
+  handleExceptTStringWithExit,
+  handleExceptTWithExit,
+  runReoptInIO,
+  reportErrorAndExit,
+  checkedReadFile,
+)
 where
 
-import Control.Exception
-import Control.Monad.Except
-import qualified Data.ByteString as BS
-import Data.Macaw.Utils.IncComp
-import System.Exit
-import System.IO
-import System.IO.Error
+import Control.Exception (catch)
+import Control.Monad.Except (ExceptT, runExceptT)
+import Data.ByteString qualified as BS
+import Data.Macaw.Utils.IncComp (
+  IncCompM,
+  processIncCompLogs,
+  runIncCompM,
+ )
+import System.Exit (exitFailure)
+import System.IO (hPrint, hPutStrLn, stderr)
+import System.IO.Error (ioeGetErrorType, isDoesNotExistError)
 
 handleEitherWithExit :: Show e => Either e a -> IO a
 handleEitherWithExit r = do
@@ -59,10 +63,10 @@ checkedReadFile :: FilePath -> IO BS.ByteString
 checkedReadFile path = do
   let h e
         | isDoesNotExistError e = do
-          hPutStrLn stderr $ path ++ " does not exist."
-          exitFailure
+            hPutStrLn stderr $ path ++ " does not exist."
+            exitFailure
         | otherwise = do
-          hPutStrLn stderr (show e)
-          hPutStrLn stderr (show (ioeGetErrorType e))
-          exitFailure
+            hPrint stderr e
+            hPrint stderr (ioeGetErrorType e)
+            exitFailure
   BS.readFile path `catch` h

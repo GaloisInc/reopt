@@ -1,81 +1,98 @@
-{-# LANGUAGE DataKinds           #-}
-{-# LANGUAGE LambdaCase          #-}
-{-# LANGUAGE NamedFieldPuns      #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections       #-}
-{-# LANGUAGE TypeApplications    #-}
-{-# LANGUAGE ViewPatterns        #-}
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Residual (runResidual) where
 
-import           Control.Monad                 (forM_)
-import qualified Data.ByteString.Char8         as BSC
-import           Data.IORef                    (newIORef)
-import qualified Data.Map                      as Map
-import qualified Data.Vector                   as Vec
-import           Data.Word                     (Word64)
-import           Numeric                       (showHex)
+import Control.Monad (forM_)
+import Data.ByteString.Char8 qualified as BSC
+import Data.IORef (newIORef)
+import Data.Map qualified as Map
+import Data.Vector qualified as Vec
+import Data.Word (Word64)
+import Numeric (showHex)
 
-import           Data.Macaw.Discovery          (DiscoveryState (memory))
-import           Data.Macaw.Memory             (MemChunk (ByteRegion),
-                                                MemSegment (segmentFlags, segmentOffset),
-                                                MemWord (memWordValue), Memory,
-                                                forcedTakeMemChunks,
-                                                memSegments, memWord,
-                                                resolveAbsoluteAddr,
-                                                segmentSize,
-                                                segoffAsAbsoluteAddr,
-                                                segoffContentsAfter,
-                                                segoffOffset, segoffSegment)
-import qualified Data.Macaw.Memory.Permissions as Perm
+import Data.Macaw.Discovery (DiscoveryState (memory))
+import Data.Macaw.Memory (MemChunk, Memory)
+import Data.Macaw.Memory qualified as Mem
+import Data.Macaw.Memory.Permissions qualified as Perm
 
-import           Reopt                         (LoadOptions (LoadOptions),
-                                                RecoverX86Output (recoveredModule, summaryFailures),
-                                                ReoptOptions, X86_64,
-                                                loadOffset,
-                                                parseElfHeaderInfo64,
-                                                recoverX86Elf, resolveHeader,
-                                                roVerboseMode, runReoptM)
-import           Reopt.CFG.FnRep               (FnBlock, RecoveredModule,
-                                                fbLabel, fbSize,
-                                                fnBlockLabelAddr, fnBlocks,
-                                                recoveredDefs)
-import           Reopt.Events                  (ReoptLogEvent, initReoptSummary,
-                                                joinLogEvents, printLogEvent,
-                                                recoverLogEvent)
-import           Reopt.Utils.Exit              (checkedReadFile,
-                                                handleEitherStringWithExit,
-                                                handleEitherWithExit)
+import Reopt (
+  LoadOptions (LoadOptions),
+  RecoverX86Output (recoveredModule, summaryFailures),
+  ReoptOptions,
+  X86_64,
+  loadOffset,
+  parseElfHeaderInfo64,
+  recoverX86Elf,
+  resolveHeader,
+  roVerboseMode,
+  runReoptM,
+ )
+import Reopt.CFG.FnRep (
+  FnBlock,
+  RecoveredModule,
+  fbLabel,
+  fbSize,
+  fnBlockLabelAddr,
+  fnBlocks,
+  recoveredDefs,
+ )
+import Reopt.Events (
+  ReoptLogEvent,
+  initReoptSummary,
+  joinLogEvents,
+  printLogEvent,
+  recoverLogEvent,
+ )
+import Reopt.Utils.Exit (
+  checkedReadFile,
+  handleEitherStringWithExit,
+  handleEitherWithExit,
+ )
 
-import           CommandLine                   (Options,
-                                                ResidualOptions (roClangPath, roHeader, roOutputForSpreadsheet, roPaths))
-import           Common                        (findAllElfFilesInDirs)
-import           Data.Either                   (fromRight)
-import           Data.ElfEdit                  (ElfHeaderInfo,
-                                                Shdr (shdrAddr, shdrName, shdrSize),
-                                                Symtab (symtabEntries),
-                                                SymtabEntry (steName, steValue),
-                                                decodeHeaderSymtab,
-                                                headerNamedShdrs)
-import           Data.List                     (find, partition)
-import           Data.Maybe                    (isJust, mapMaybe)
-import           Flexdis86                     (DisassembledAddr (disInstruction, disOffset),
-                                                disassembleBuffer,
-                                                ppInstruction)
-import qualified Prettyprinter                 as PP
-import           Prettyprinter.Render.String   (renderString)
-import           Residual.Recognizers          (ResidualExplanation (BecauseFailure),
-                                                classifyInstrs,
-                                                ppResidualExplanation)
-import           Text.Printf                   (printf)
+import CommandLine (
+  Options,
+  ResidualOptions (roClangPath, roHeader, roOutputForSpreadsheet, roPaths),
+ )
+import Common (findAllElfFilesInDirs)
+import Data.Either (fromRight)
+import Data.ElfEdit (
+  ElfHeaderInfo,
+  Shdr (shdrAddr, shdrName, shdrSize),
+  Symtab (symtabEntries),
+  SymtabEntry (steName, steValue),
+  decodeHeaderSymtab,
+  headerNamedShdrs,
+ )
+import Data.List (find, partition)
+import Data.Maybe (isJust, mapMaybe)
+import Flexdis86 (
+  DisassembledAddr (disInstruction, disOffset),
+  disassembleBuffer,
+  ppInstruction,
+ )
+import Prettyprinter qualified as PP
+import Prettyprinter.Render.String (renderString)
+import Residual.Recognizers (
+  ResidualExplanation (BecauseFailure),
+  classifyInstrs,
+  ppResidualExplanation,
+ )
+import Text.Printf (printf)
 
-newtype InclusiveRange w = InclusiveRange { getInclusiveRange :: (w, w) }
+newtype InclusiveRange w = InclusiveRange {getInclusiveRange :: (w, w)}
 
 instance (Integral w, Num w, Show w) => Show (InclusiveRange w) where
   show r =
     "0x" <> showHex (rangeLowerBound r) "" <> " - 0x" <> showHex (rangeUpperBound r) ""
-    -- sometimes nice when debugging:
-    -- <> " (size: " <> show (rangeSize r) <> "B)"
+
+-- sometimes nice when debugging:
+-- <> " (size: " <> show (rangeSize r) <> "B)"
 
 rangeSize :: Num a => InclusiveRange a -> a
 rangeSize (getInclusiveRange -> (lo, hi)) = hi - lo + 1
@@ -94,10 +111,10 @@ ppInclusiveRange (getInclusiveRange -> (lo, hi)) = showHex lo "" <> " - " <> sho
 
 shdrInclusiveRange :: (Eq w, Ord w, Num w) => Shdr nm w -> Maybe (InclusiveRange w)
 shdrInclusiveRange s =
-  let addr = shdrAddr s in
-  if addr == 0 || shdrSize s == 0
-    then Nothing
-    else Just $ InclusiveRange (shdrAddr s, shdrAddr s + shdrSize s - 1)
+  let addr = shdrAddr s
+   in if addr == 0 || shdrSize s == 0
+        then Nothing
+        else Just $ InclusiveRange (shdrAddr s, shdrAddr s + shdrSize s - 1)
 
 inInclusiveRange :: (Num w, Ord w, Show w) => InclusiveRange w -> w -> Bool
 inInclusiveRange r v = rangeLowerBound r <= v && v <= rangeUpperBound r
@@ -105,7 +122,7 @@ inInclusiveRange r v = rangeLowerBound r <= v && v <= rangeUpperBound r
 type RangedShdr nm w = (InclusiveRange w, Shdr nm w)
 
 rangedShdr :: (Num w, Ord w) => Shdr nm w -> Maybe (RangedShdr nm w)
-rangedShdr s = (, s) <$> shdrInclusiveRange s
+rangedShdr s = (,s) <$> shdrInclusiveRange s
 
 createLogger :: ReoptOptions -> FilePath -> IO (ReoptLogEvent arch -> IO ())
 createLogger reoptOpts filePath = do
@@ -122,21 +139,23 @@ performRecovery ::
   (a, FilePath) ->
   IO (ElfHeaderInfo 64, DiscoveryState X86_64, RecoverX86Output)
 performRecovery residualOpts reoptOpts (_idx, fPath) = do
-  let lOpts = LoadOptions {loadOffset = Nothing}
+  let lOpts = LoadOptions{loadOffset = Nothing}
   let unnamedFunPrefix = BSC.pack "reopt"
   -- hPutStrLn stderr $ "[" ++ (show index) ++ " of " ++ (show totalCount)
   --                    ++ "] Analyzing " ++ fPath ++ " ..."
   bs <- checkedReadFile fPath
   annDecl <-
-    runReoptM printLogEvent
-      (resolveHeader (roHeader residualOpts) (roClangPath residualOpts)) >>=
-        either (error . show) return
+    runReoptM
+      printLogEvent
+      (resolveHeader (roHeader residualOpts) (roClangPath residualOpts))
+      >>= either (error . show) return
   hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
   logger <- createLogger reoptOpts fPath
   (_os, ds, recovOut, _) <-
-    handleEitherWithExit =<<
-       runReoptM logger
-         (recoverX86Elf lOpts reoptOpts annDecl unnamedFunPrefix hdrInfo)
+    handleEitherWithExit
+      =<< runReoptM
+        logger
+        (recoverX86Elf lOpts reoptOpts annDecl unnamedFunPrefix hdrInfo)
   return (hdrInfo, ds, recovOut)
 
 data PartitionedSegments = PartitionedSegments
@@ -159,13 +178,13 @@ computeResidualSegments discoveryState recoveredModule = do
           }
   let blocks = concatMap fnBlocks (recoveredDefs recoveredModule)
   let blockSeg (b :: FnBlock X86_64) =
-        let addr = fnBlockLabelAddr (fbLabel b) in
-        case segoffAsAbsoluteAddr addr of
-          Nothing ->
-            inclusiveRangeFromBaseAndSize
-              (memWordValue (segmentOffset (segoffSegment addr)) + memWordValue (segoffOffset addr))
-              (fbSize b)
-          Just w  -> inclusiveRangeFromBaseAndSize (memWordValue w) (fbSize b)
+        let addr = fnBlockLabelAddr (fbLabel b)
+         in case Mem.segoffAsAbsoluteAddr addr of
+              Nothing ->
+                inclusiveRangeFromBaseAndSize
+                  (Mem.memWordValue (Mem.segmentOffset (Mem.segoffSegment addr)) + Mem.memWordValue (Mem.segoffOffset addr))
+                  (fbSize b)
+              Just w -> inclusiveRangeFromBaseAndSize (Mem.memWordValue w) (fbSize b)
   let blockSegs = map blockSeg blocks
   return $ foldl registerAsBlockSegment allMemorySegments blockSegs
 
@@ -186,7 +205,7 @@ displayResiduals residualOpts parts residualInfos = do
 runResidual :: Options -> ResidualOptions -> ReoptOptions -> IO ()
 runResidual _opts residualOpts reoptOpts = do
   files <- findAllElfFilesInDirs (roPaths residualOpts)
-  forM_ files $ \ file -> do
+  forM_ files $ \file -> do
     (hdrInfo, discoveryState, recovOut) <- performRecovery residualOpts reoptOpts file
     let mem = memory discoveryState
     partitionedSegs <- computeResidualSegments discoveryState $ recoveredModule recovOut
@@ -198,13 +217,13 @@ segmentsFootprint = sum . map (uncurry subtract . getInclusiveRange)
 
 memoryToSegmentList :: Memory 64 -> [InclusiveRange Word64]
 memoryToSegmentList m = map segBounds esegs
-  where
-    esegs = filter (Perm.isExecutable . segmentFlags) (memSegments m)
-    -- assumes sorted, non-overlapping
-    segBounds eseg =
-      inclusiveRangeFromBaseAndSize
-        (memWordValue (segmentOffset eseg))
-        (memWordValue (segmentSize eseg))
+ where
+  esegs = filter (Perm.isExecutable . Mem.segmentFlags) (Mem.memSegments m)
+  -- assumes sorted, non-overlapping
+  segBounds eseg =
+    inclusiveRangeFromBaseAndSize
+      (Mem.memWordValue (Mem.segmentOffset eseg))
+      (Mem.memWordValue (Mem.segmentSize eseg))
 
 --------------------------------------------------------------------------------
 -- Segment lists
@@ -247,9 +266,11 @@ displayResidualsForHuman ranges fps =
 ppDisInstr :: Int -> DisassembledAddr -> String
 ppDisInstr ofs da =
   offset <> " " <> instr da
-  where
-    offset = printf "0x%08x" (ofs + disOffset da)
-    instr = maybe "???\n"
+ where
+  offset = printf "0x%08x" (ofs + disOffset da)
+  instr =
+    maybe
+      "???\n"
       (renderString . PP.layoutCompact . (<> PP.hardline) . ppInstruction)
       . disInstruction
 
@@ -261,7 +282,7 @@ ppDisSegment ofs = concatMap (ppDisInstr (fromIntegral ofs))
 splitSegmentAtAddresses :: [Word64] -> Segment -> [Segment]
 splitSegmentAtAddresses addrs seg@(getInclusiveRange -> (lo, hi)) =
   case find (inInclusiveRange (InclusiveRange (lo + 1, hi))) addrs of
-    Nothing    -> [seg]
+    Nothing -> [seg]
     Just split -> InclusiveRange (lo, split - 1) : splitSegmentAtAddresses addrs (InclusiveRange (split, hi))
 
 -- | Splits a list of segments into a more fine-grained list of segments, based
@@ -301,8 +322,8 @@ registerAsBlockSegment part@(residualSegments -> map getInclusiveRange -> sl) (g
 
 chunkBytes :: MemChunk 64 -> Maybe BSC.ByteString
 chunkBytes = \case
-  ByteRegion bs -> Just bs
-  _             -> error "chunkBytes: not a ByteRegion"
+  Mem.ByteRegion bs -> Just bs
+  _ -> error "chunkBytes: not a ByteRegion"
 
 -- chunksBytes :: [MemChunk 64] -> Maybe [BSC.ByteString]
 -- chunksBytes = traverse chunkBytes
@@ -317,27 +338,27 @@ chunkBytes = \case
 
 segmentInstrs :: Memory 64 -> InclusiveRange Word64 -> Maybe [DisassembledAddr]
 segmentInstrs m r = do
-  ofs <- resolveAbsoluteAddr m (memWord (rangeLowerBound r))
-  case segoffContentsAfter ofs of
+  ofs <- Mem.resolveAbsoluteAddr m (Mem.memWord (rangeLowerBound r))
+  case Mem.segoffContentsAfter ofs of
     Right chunks -> do
-      let seg = forcedTakeMemChunks chunks (memWord (rangeSize r))
+      let seg = Mem.forcedTakeMemChunks chunks (Mem.memWord (rangeSize r))
       concat <$> traverse (fmap disassembleBuffer . chunkBytes) seg
     _ -> Nothing
 
 symbolAtAddress :: Maybe (Symtab 64) -> Word64 -> Maybe String
 symbolAtAddress mSymTab addr =
-  let symbolEntryForSegment symTab = Vec.find ((== addr) . steValue) $ symtabEntries @64 symTab in
-  let symbolForSegment = fmap (BSC.unpack . steName) . symbolEntryForSegment in
-  symbolForSegment =<< mSymTab
+  let symbolEntryForSegment symTab = Vec.find ((== addr) . steValue) $ symtabEntries @64 symTab
+   in let symbolForSegment = fmap (BSC.unpack . steName) . symbolEntryForSegment
+       in symbolForSegment =<< mSymTab
 
 data ResidualRangeInfo = ResidualRangeInfo
-  { rriRange        :: InclusiveRange Word64
-  , -- | Just the difference between the bounds of the range, for convenience
-    rriFootprint    :: Word64
-  , rriSection      :: Maybe (Shdr BSC.ByteString Word64)
-  , rriSymbolName   :: Maybe String
+  { rriRange :: InclusiveRange Word64
+  , rriFootprint :: Word64
+  -- ^ Just the difference between the bounds of the range, for convenience
+  , rriSection :: Maybe (Shdr BSC.ByteString Word64)
+  , rriSymbolName :: Maybe String
   , rriInstructions :: Maybe [DisassembledAddr]
-  , rriExplanation  :: Maybe ResidualExplanation
+  , rriExplanation :: Maybe ResidualExplanation
   }
 
 classifyResidual ::
@@ -348,12 +369,12 @@ classifyResidual ::
 classifyResidual recovOut range instrs =
   case classifyInstrs =<< instrs of
     Just expl -> Just expl
-    Nothing   ->
+    Nothing ->
       let
         failures = Map.toList $ summaryFailures recovOut
-        overlaps (k, _) = maybe False (inInclusiveRange range . memWordValue) (segoffAsAbsoluteAddr k)
-      in
-      BecauseFailure . snd <$> find overlaps failures
+        overlaps (k, _) = maybe False (inInclusiveRange range . Mem.memWordValue) (Mem.segoffAsAbsoluteAddr k)
+       in
+        BecauseFailure . snd <$> find overlaps failures
 
 constructResidualRangeInfos ::
   ElfHeaderInfo 64 ->

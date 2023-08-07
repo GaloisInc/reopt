@@ -33,8 +33,15 @@ module Reopt.CFG.FnRep (
 
 import Control.Monad.Identity (Identity (runIdentity))
 import Data.ByteString.Char8 qualified as BSC
-import Data.Kind
-import Data.Parameterized.Classes
+import Data.Kind (Type)
+import Data.Parameterized.Classes (
+  OrdF (compareF),
+  OrderingF (EQF, GTF, LTF),
+  ShowF,
+  TestEquality (..),
+  orderingF_refl,
+  type (:~:) (Refl),
+ )
 import Data.Parameterized.NatRepr (type (<=))
 import Data.Parameterized.Some (Some (..), viewSome)
 import Data.Parameterized.TraversableF (FoldableF (foldlF'))
@@ -378,11 +385,13 @@ instance
       FnWriteMem addr val -> "*" <> PP.pretty addr PP.<+> ":=" PP.<+> PP.pretty val
       FnCondWriteMem cond addr val _repr -> "cond_write" PP.<+> PP.pretty cond PP.<+> PP.pretty addr PP.<+> PP.pretty val
       FnCall f args mret ->
-        let argDocs = (\(Some v) -> PP.pretty v) <$> args
-            retDoc = case mret of
-              Just (Some r) -> PP.pretty r <> " := "
-              Nothing -> mempty
-         in retDoc <> "call" PP.<+> PP.pretty f <> PP.parens (commas argDocs)
+        let
+          argDocs = (\(Some v) -> PP.pretty v) <$> args
+          retDoc = case mret of
+            Just (Some r) -> PP.pretty r <> " := "
+            Nothing -> mempty
+         in
+          retDoc <> "call" PP.<+> PP.pretty f <> PP.parens (commas argDocs)
       FnArchStmt stmt -> ppArchStmt PP.pretty stmt
 
 instance FoldFnValue FnStmt where
@@ -406,9 +415,11 @@ fnBlockLabelFromAddr = FnBlockLabel
 
 instance PP.Pretty (FnBlockLabel w) where
   pretty (FnBlockLabel s) =
-    let a = segoffAddr s
-        o = memWordToUnsigned (addrOffset a)
-     in "block_" <> PP.pretty (addrBase a) <> "_" <> PP.pretty (showHex o "")
+    let
+      a = segoffAddr s
+      o = memWordToUnsigned (addrOffset a)
+     in
+      "block_" <> PP.pretty (addrBase a) <> "_" <> PP.pretty (showHex o "")
 
 -- | Render block label as a string
 fnBlockLabelString :: FnBlockLabel w -> String
@@ -610,21 +621,23 @@ instance
   PP.Pretty (Function arch)
   where
   pretty fn =
-    let nm = PP.pretty (BSC.unpack (fnName fn))
-        addr = PP.pretty (fnAddr fn)
-        ftp = fnType fn
-        ppArg :: Integer -> Some TypeRepr -> PP.Doc a
-        ppArg i (Some tp) = "arg" <> PP.pretty i <> " : " <> PP.pretty tp
-        atp = PP.parens (commas (zipWith ppArg [0 ..] (fnArgTypes ftp)))
-        rtp = case fnReturnType ftp of
-          Nothing -> "void"
-          Just (Some tp) -> PP.pretty tp
-     in PP.vcat
-          [ "function " <> nm <> " @ " <> addr <> atp <> " : " <> rtp
-          , PP.lbrace
-          , PP.indent 4 $ PP.vcat (PP.pretty <$> fnBlocks fn)
-          , PP.rbrace
-          ]
+    let
+      nm = PP.pretty (BSC.unpack (fnName fn))
+      addr = PP.pretty (fnAddr fn)
+      ftp = fnType fn
+      ppArg :: Integer -> Some TypeRepr -> PP.Doc a
+      ppArg i (Some tp) = "arg" <> PP.pretty i <> " : " <> PP.pretty tp
+      atp = PP.parens (commas (zipWith ppArg [0 ..] (fnArgTypes ftp)))
+      rtp = case fnReturnType ftp of
+        Nothing -> "void"
+        Just (Some tp) -> PP.pretty tp
+     in
+      PP.vcat
+        [ "function " <> nm <> " @ " <> addr <> atp <> " : " <> rtp
+        , PP.lbrace
+        , PP.indent 4 $ PP.vcat (PP.pretty <$> fnBlocks fn)
+        , PP.rbrace
+        ]
 
 -- | A function declaration that has type information, but no recovered definition.
 data FunctionDecl arch = FunctionDecl

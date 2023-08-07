@@ -114,13 +114,15 @@ recordRegionUse ::
   FunUseMap w ->
   FunUseMap w
 recordRegionUse f so sz (FunUseMap regionMap) = do
-  let a = segoffAddr so
-      -- Offset of block
-      off :: BlockOff
-      off = memWordValue (addrOffset a)
-      initMap = initFunUseOffsetMap f off (off + sz)
-      updMap _ = updateFunUseOffsetMap f off (off + sz)
-   in FunUseMap (Map.insertWith updMap (addrBase a) initMap regionMap)
+  let
+    a = segoffAddr so
+    -- Offset of block
+    off :: BlockOff
+    off = memWordValue (addrOffset a)
+    initMap = initFunUseOffsetMap f off (off + sz)
+    updMap _ = updateFunUseOffsetMap f off (off + sz)
+   in
+    FunUseMap (Map.insertWith updMap (addrBase a) initMap regionMap)
 
 -- | Record memory used by block to function address
 recordBlockUse ::
@@ -132,8 +134,9 @@ recordBlockUse f b = do
   -- Record jumptable backing as well.
   case pblockTermStmt b of
     ParsedLookupTable layout _ _ _ -> do
-      let a = jtlBackingAddr layout
-          sz = jtlBackingSize layout
+      let
+        a = jtlBackingAddr layout
+        sz = jtlBackingSize layout
       modify $ recordRegionUse f a sz
     _ -> pure ()
 
@@ -166,15 +169,17 @@ endOwnedByFun f o m regionSize =
 -- point in the segment that are exclusive allocated to function.
 lookupFunSize :: MemWidth w => MemSegmentOff w -> FunUseMap w -> Word64
 lookupFunSize f (FunUseMap m) =
-  let seg = segoffSegment f
-      a = segoffAddr f
-      o = memWordValue (addrOffset a)
-      err = error "internal error: Function register index"
-      offMap = Map.findWithDefault err (addrBase a) m
-      maxValue = memWordValue (segmentSize seg) - memWordValue (segoffOffset f)
-   in case Map.lookup o offMap of
-        Just _ -> endOwnedByFun f o offMap maxValue - o
-        Nothing -> error $ "Unknown function " ++ showHex o ""
+  let
+    seg = segoffSegment f
+    a = segoffAddr f
+    o = memWordValue (addrOffset a)
+    err = error "internal error: Function register index"
+    offMap = Map.findWithDefault err (addrBase a) m
+    maxValue = memWordValue (segmentSize seg) - memWordValue (segoffOffset f)
+   in
+    case Map.lookup o offMap of
+      Just _ -> endOwnedByFun f o offMap maxValue - o
+      Nothing -> error $ "Unknown function " ++ showHex o ""
 
 totalFunUseOffsetMapSize :: FunUseOffsetMap w -> Word64
 totalFunUseOffsetMapSize = Map.foldlWithKey' (\z s (e, _) -> z + (e - s)) 0

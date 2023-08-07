@@ -50,9 +50,11 @@ ppBuffer = go . BS.unpack
 
 phdrContents :: Integral (Elf.ElfWordType w) => Elf.ElfHeaderInfo w -> Elf.Phdr w -> BS.ByteString
 phdrContents elf p =
-  let off = fromIntegral (Elf.phdrFileStart p)
-      sz = fromIntegral (Elf.phdrFileSize p)
-   in BS.take sz $ BS.drop off (Elf.headerFileContents elf)
+  let
+    off = fromIntegral (Elf.phdrFileStart p)
+    sz = fromIntegral (Elf.phdrFileSize p)
+   in
+    BS.take sz $ BS.drop off (Elf.headerFileContents elf)
 
 word32LE :: Word32 -> BS.ByteString
 word32LE x = BS.pack [w 0, w 1, w 2, w 3]
@@ -289,10 +291,12 @@ endbrBndJmpInsns pltBaseAddr gotMap idx actual = do
   unless (BS.take 7 actual == expectedInsn) $ do
     Left $ "ebj: " ++ ppBuffer expectedInsn
   -- Compute index we are jumping to.
-  let actualDelta :: Word32
-      actualDelta = getWord32LE actual 7
-  let actualAddr :: Word64
-      actualAddr = fromIntegral pltEntryAddr + 11 + fromIntegral actualDelta
+  let
+    actualDelta :: Word32
+    actualDelta = getWord32LE actual 7
+  let
+    actualAddr :: Word64
+    actualAddr = fromIntegral pltEntryAddr + 11 + fromIntegral actualDelta
   -- Check 5-byte no-op instruction at end.
   let actualNop = BS.drop 11 actual
   let expectedNop5 = [nopl5Insn, nopl4Insn <> nopInsn]
@@ -373,14 +377,16 @@ jmp8Insns pltAddr idx actual = do
   unless (BS.take 2 actual == indRelJmpInsnPrefix) $ do
     Left $ "jm8: Jmp " ++ ppBuffer indRelJmpInsnPrefix
   -- Indirect jump target
-  let actualDelta :: Word32
-      actualDelta = getWord32LE actual 2
-  let actualAddr :: Word64
-      actualAddr =
-        fromIntegral pltEntryAddr
-          + fromIntegral idx
-          + 4
-          + fromIntegral actualDelta
+  let
+    actualDelta :: Word32
+    actualDelta = getWord32LE actual 2
+  let
+    actualAddr :: Word64
+    actualAddr =
+      fromIntegral pltEntryAddr
+        + fromIntegral idx
+        + 4
+        + fromIntegral actualDelta
   unless (BS.take 2 (BS.drop 6 actual) == nopl2Insn) $ do
     Left $ "jm8: Nop " ++ ppBuffer nopl2Insn
   pure $! PLTJmp8 actualAddr
@@ -413,33 +419,35 @@ checkPLT elf mpltgotAddr gotMap shdr = Elf.elfClassInstances (Elf.headerClass (E
   let (cnt, m) = fileSize `quotRem` entrySize
   when (m /= 0) $ do
     throwError $ printf "%s is not a multiple of expected entry size." shdrName
-  let pltAddr :: Elf.ElfWordType w
-      pltAddr = Elf.shdrAddr shdr
+  let
+    pltAddr :: Elf.ElfWordType w
+    pltAddr = Elf.shdrAddr shdr
 
   -- Check entries
   v <- forM (V.generate cnt fromIntegral) $ \(idx :: Word32) -> do
     -- Recognizers
-    let recognizers :: [BS.ByteString -> Either String PLTEntry]
-        recognizers
-          | hasPLT8Size pltContents =
-              [jmp8Insns pltAddr idx]
-          | otherwise =
-              case Elf.shdrName shdr of
-                ".plt"
-                  | Just pltgotAddr <- mpltgotAddr
-                  , idx == 0 ->
-                      [ jmpPushJumpDispatch pltAddr pltgotAddr
-                      , bndPLTInitInsn pltAddr pltgotAddr
-                      ]
-                  | Just pltgotAddr <- mpltgotAddr ->
-                      [ pltIdxInsns pltAddr pltgotAddr idx
-                      , pltBndIdxInsns idx
-                      , endbrBndJmpInsns pltAddr gotMap idx
-                      ]
-                  | otherwise -> []
-                ".plt.got" -> [endbrBndJmpInsns pltAddr gotMap idx]
-                ".plt.sec" -> [endbrBndJmpInsns pltAddr gotMap idx]
-                _ -> error "Unexpected section header."
+    let
+      recognizers :: [BS.ByteString -> Either String PLTEntry]
+      recognizers
+        | hasPLT8Size pltContents =
+            [jmp8Insns pltAddr idx]
+        | otherwise =
+            case Elf.shdrName shdr of
+              ".plt"
+                | Just pltgotAddr <- mpltgotAddr
+                , idx == 0 ->
+                    [ jmpPushJumpDispatch pltAddr pltgotAddr
+                    , bndPLTInitInsn pltAddr pltgotAddr
+                    ]
+                | Just pltgotAddr <- mpltgotAddr ->
+                    [ pltIdxInsns pltAddr pltgotAddr idx
+                    , pltBndIdxInsns idx
+                    , endbrBndJmpInsns pltAddr gotMap idx
+                    ]
+                | otherwise -> []
+              ".plt.got" -> [endbrBndJmpInsns pltAddr gotMap idx]
+              ".plt.sec" -> [endbrBndJmpInsns pltAddr gotMap idx]
+              _ -> error "Unexpected section header."
     -- Get entry contents
     let off = entrySize * fromIntegral idx
     let entryContents = BS.take entrySize $ BS.drop off pltContents
@@ -496,8 +504,9 @@ checkRela nm dta bs allowed cnt m idx = do
   if idx >= cnt
     then pure m
     else do
-      let rela :: Elf.RelaEntry Elf.X86_64_RelocationType
-          rela = Elf.decodeRelaEntry dta bs (fromIntegral idx)
+      let
+        rela :: Elf.RelaEntry Elf.X86_64_RelocationType
+        rela = Elf.decodeRelaEntry dta bs (fromIntegral idx)
       when (Elf.relaType rela `notElem` allowed) $ do
         throwError $ printf "%s: Unexpected relocation type %s." nm (show (Elf.relaType rela))
       case Elf.relaType rela of
@@ -635,28 +644,31 @@ extractPLTEntries elf shdrs = runExcept $ do
         -- Note. There are binaries with `.plt.got` sections but no DT_PLTGOT section.
         pltgotAddr <- tryGetDynamicWord dynSection Elf.DT_PLTGOT
 
-        let gotAddrMap :: Map.Map Word64 Word32
-            gotAddrMap = relaMap <> jmprelMap
-        let ins ::
-              PLTMap w ->
-              Elf.Shdr BS.ByteString (Elf.ElfWordType w) ->
-              Except String (PLTMap w)
-            ins m0 shdr
-              | Elf.shdrName shdr `elem` [".plt", ".plt.got", ".plt.sec"]
-              , Elf.shdrType shdr /= Elf.SHT_NOBITS = do
-                  (entrySize, pltEntries) <- checkPLT elf pltgotAddr gotAddrMap shdr
-                  let insEntry ::
-                        PLTMap w ->
-                        Int ->
-                        Except String (PLTMap w)
-                      insEntry m i = do
-                        let addr = Elf.shdrAddr shdr + fromIntegral (entrySize * i)
-                        let entry = pltEntries V.! i
-                        e <- resolvePLTEntry gotAddrMap addr entry
-                        pure $! Map.insert addr (e, fromIntegral entrySize) m
-                  foldlM insEntry m0 (V.generate (V.length pltEntries) id)
-              | otherwise =
-                  pure m0
+        let
+          gotAddrMap :: Map.Map Word64 Word32
+          gotAddrMap = relaMap <> jmprelMap
+        let
+          ins ::
+            PLTMap w ->
+            Elf.Shdr BS.ByteString (Elf.ElfWordType w) ->
+            Except String (PLTMap w)
+          ins m0 shdr
+            | Elf.shdrName shdr `elem` [".plt", ".plt.got", ".plt.sec"]
+            , Elf.shdrType shdr /= Elf.SHT_NOBITS = do
+                (entrySize, pltEntries) <- checkPLT elf pltgotAddr gotAddrMap shdr
+                let
+                  insEntry ::
+                    PLTMap w ->
+                    Int ->
+                    Except String (PLTMap w)
+                  insEntry m i = do
+                    let addr = Elf.shdrAddr shdr + fromIntegral (entrySize * i)
+                    let entry = pltEntries V.! i
+                    e <- resolvePLTEntry gotAddrMap addr entry
+                    pure $! Map.insert addr (e, fromIntegral entrySize) m
+                foldlM insEntry m0 (V.generate (V.length pltEntries) id)
+            | otherwise =
+                pure m0
         m <- foldlM ins Map.empty shdrs
         pure $
           Just $

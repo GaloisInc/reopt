@@ -383,9 +383,10 @@ emitX86ArchStmt _ (X86FnStmt stmt) =
             WordRepVal -> "rep movsw"
             DWordRepVal -> "rep movsd"
             QWordRepVal -> "rep movsq"
-      let dfAsm = if df
-            then "std\n" ++ movsAsm ++ "\ncld"
-            else movsAsm
+      let dfAsm =
+            if df
+              then "std\n" ++ movsAsm ++ "\ncld"
+              else movsAsm
       callAsm_
         noSideEffect
         (dfAsm ++ "\n" ++ movsAsm)
@@ -404,9 +405,10 @@ emitX86ArchStmt _ (X86FnStmt stmt) =
             WordRepVal -> "rep stosw"
             DWordRepVal -> "rep stosd"
             QWordRepVal -> "rep stosq"
-      let dfAsm = if df
-            then "std\n" ++ stosAsm ++ "\ncld"
-            else stosAsm
+      let dfAsm =
+            if df
+              then "std\n" ++ stosAsm ++ "\ncld"
+              else stosAsm
       callAsm_
         noSideEffect
         dfAsm

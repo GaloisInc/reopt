@@ -385,18 +385,21 @@ substituteShdrName shstrtab shdr =
 getShdrTable :: Elf.ElfHeaderInfo 64 -> PureRelinkM (V.Vector (Elf.Shdr BS.ByteString Word64))
 getShdrTable binHeaderInfo = do
   -- Index of section header entry for section name table.
-  let shstrtabShdrIndex :: Word16
-      shstrtabShdrIndex = Elf.shstrtabIndex binHeaderInfo
+  let
+    shstrtabShdrIndex :: Word16
+    shstrtabShdrIndex = Elf.shstrtabIndex binHeaderInfo
 
   when (shstrtabShdrIndex == 0) $ do
     throwError "Require non-zero shstrtab index."
   -- Sections in binary
-  let rawBinShdrs :: V.Vector (Elf.Shdr Word32 Word64)
-      rawBinShdrs = Elf.headerShdrs binHeaderInfo
+  let
+    rawBinShdrs :: V.Vector (Elf.Shdr Word32 Word64)
+    rawBinShdrs = Elf.headerShdrs binHeaderInfo
   when (fromIntegral shstrtabShdrIndex >= V.length rawBinShdrs) $ do
     throwError "Invalid binary section header table"
-  let binShstrtab :: BS.ByteString
-      binShstrtab = getShdrContents (rawBinShdrs V.! fromIntegral shstrtabShdrIndex) binHeaderInfo
+  let
+    binShstrtab :: BS.ByteString
+    binShstrtab = getShdrContents (rawBinShdrs V.! fromIntegral shstrtabShdrIndex) binHeaderInfo
   traverse (substituteShdrName binShstrtab) rawBinShdrs
 
 --------------------------------------------------------------------------------
@@ -414,9 +417,11 @@ mkAddrToSectionMap = V.ifoldl' ins Map.empty
  where
   ins m idx shdr
     | (Elf.shdrFlags shdr .&. Elf.shf_alloc) == Elf.shf_alloc =
-        let addr = Elf.shdrAddr shdr
-            sz = Elf.shdrSize shdr
-         in Map.insert addr (sz, fromIntegral idx) m
+        let
+          addr = Elf.shdrAddr shdr
+          sz = Elf.shdrSize shdr
+         in
+          Map.insert addr (sz, fromIntegral idx) m
     | otherwise = m
 
 --------------------------------------------------------------------------------
@@ -478,13 +483,15 @@ performObjRelocs ::
 performObjRelocs elfHdr objShdrs objRelocInfo (NewAddr addr) secIdx = do
   let elfDta = Elf.headerData (Elf.header elfHdr)
   let contents = Elf.headerFileContents elfHdr
-  let shdrCount :: Word32
-      shdrCount = fromIntegral (V.length objShdrs)
+  let
+    shdrCount :: Word32
+    shdrCount = fromIntegral (V.length objShdrs)
   when (secIdx >= fromIntegral shdrCount) $ do
     error "Internal error: invalid shdr index"
   let shdr = objShdrs V.! fromIntegral secIdx
-  let nm :: String
-      nm = BSC.unpack (Elf.shdrName shdr)
+  let
+    nm :: String
+    nm = BSC.unpack (Elf.shdrName shdr)
   code <- pureCheckedSlice (nm <> " section") (Elf.shdrFileRange shdr) contents
   case findRelaSection objRelocInfo secIdx of
     Nothing -> do
@@ -518,23 +525,24 @@ generateOverflowSection ::
   [ObjectSectionIndex] ->
   PureRelinkM Bld.Builder
 generateOverflowSection objHeaderInfo objShdrs objRelocInfo overflowAddr overflowSections = do
-  let insObjFun ::
-        ObjectSectionIndex ->
-        (NewAddr -> Bld.Builder -> PureRelinkM Bld.Builder) ->
-        -- \^ Continuation that takes next address and
-        -- object code built so far.
-        NewAddr ->
-        -- \^ Current address
-        Bld.Builder ->
-        -- \^ Bytestring built so far.
-        PureRelinkM Bld.Builder
-      insObjFun secIdx cont addr prev = do
-        bytes <-
-          case runExcept (performObjRelocs objHeaderInfo objShdrs objRelocInfo addr secIdx) of
-            Left e -> throwError e
-            Right r -> pure r
-        let newAddr = incNewAddr addr (BS.length bytes)
-        cont newAddr (prev <> Bld.byteString bytes)
+  let
+    insObjFun ::
+      ObjectSectionIndex ->
+      (NewAddr -> Bld.Builder -> PureRelinkM Bld.Builder) ->
+      -- \^ Continuation that takes next address and
+      -- object code built so far.
+      NewAddr ->
+      -- \^ Current address
+      Bld.Builder ->
+      -- \^ Bytestring built so far.
+      PureRelinkM Bld.Builder
+    insObjFun secIdx cont addr prev = do
+      bytes <-
+        case runExcept (performObjRelocs objHeaderInfo objShdrs objRelocInfo addr secIdx) of
+          Left e -> throwError e
+          Right r -> pure r
+      let newAddr = incNewAddr addr (BS.length bytes)
+      cont newAddr (prev <> Bld.byteString bytes)
   foldr insObjFun (\_ p -> pure p) overflowSections overflowAddr mempty
 
 -- | Make the new code program header
@@ -561,37 +569,39 @@ mkBinCodeContent binContents objHeaderInfo objShdrs objRelocInfo objInfo codeAdd
   let codeEndAddr = codeAddr + fromIntegral codeSize
   -- Map from addresses of functions to be replaced in
   --  binary to the section index of that object
-  let objBinCodeMap :: Map Word64 ObjectSectionIndex
-      objBinCodeMap =
-        Map.takeWhileAntitone (< codeEndAddr) $
-          Map.dropWhileAntitone (< codeAddr) $
-            replaceAddrSectionMap objInfo
+  let
+    objBinCodeMap :: Map Word64 ObjectSectionIndex
+    objBinCodeMap =
+      Map.takeWhileAntitone (< codeEndAddr) $
+        Map.dropWhileAntitone (< codeAddr) $
+          replaceAddrSectionMap objInfo
   -- Infer bytes in regions
-  let insObjBin ::
-        Word64 ->
-        -- \^ Address of next function in object file.
-        ObjectSectionIndex ->
-        -- \^ Section index in object file.
-        ((Word64, BS.ByteString, Bld.Builder) -> Except String a) ->
-        (Word64, BS.ByteString, Bld.Builder) ->
-        Except String a
-      insObjBin nextObjAddr secIdx cont (prevEndAddr, curBytes, prev) = do
-        when (nextObjAddr < prevEndAddr) $ do
-          throwError $
-            printf
-              "Expected next function %s after previous function ends %s."
-              (showHex nextObjAddr "")
-              (showHex prevEndAddr "")
-        -- Get size of binary data to copy from last address to new one.
-        let binSize = fromIntegral (nextObjAddr - prevEndAddr)
-        -- Get bytes in binary in front of object code.
-        let binCopy = Bld.byteString (BS.take binSize curBytes)
-        -- Get relocation code
-        bytes <- performObjRelocs objHeaderInfo objShdrs objRelocInfo (NewAddr nextObjAddr) secIdx
-        -- Go to next
-        let thisEndAddr = nextObjAddr + fromIntegral (BS.length bytes)
-        let nextBytes = BS.drop (fromIntegral (thisEndAddr - prevEndAddr)) curBytes
-        cont (thisEndAddr, nextBytes, prev <> binCopy <> Bld.byteString bytes)
+  let
+    insObjBin ::
+      Word64 ->
+      -- \^ Address of next function in object file.
+      ObjectSectionIndex ->
+      -- \^ Section index in object file.
+      ((Word64, BS.ByteString, Bld.Builder) -> Except String a) ->
+      (Word64, BS.ByteString, Bld.Builder) ->
+      Except String a
+    insObjBin nextObjAddr secIdx cont (prevEndAddr, curBytes, prev) = do
+      when (nextObjAddr < prevEndAddr) $ do
+        throwError $
+          printf
+            "Expected next function %s after previous function ends %s."
+            (showHex nextObjAddr "")
+            (showHex prevEndAddr "")
+      -- Get size of binary data to copy from last address to new one.
+      let binSize = fromIntegral (nextObjAddr - prevEndAddr)
+      -- Get bytes in binary in front of object code.
+      let binCopy = Bld.byteString (BS.take binSize curBytes)
+      -- Get relocation code
+      bytes <- performObjRelocs objHeaderInfo objShdrs objRelocInfo (NewAddr nextObjAddr) secIdx
+      -- Go to next
+      let thisEndAddr = nextObjAddr + fromIntegral (BS.length bytes)
+      let nextBytes = BS.drop (fromIntegral (thisEndAddr - prevEndAddr)) curBytes
+      cont (thisEndAddr, nextBytes, prev <> binCopy <> Bld.byteString bytes)
   let finish (_, remaining, prev) = pure $ prev <> Bld.byteString remaining
   Map.foldrWithKey insObjBin finish objBinCodeMap (codeAddr, codeBytes, mempty)
 
@@ -612,17 +622,20 @@ getObjectSymbols objHeaderInfo objShdrs objSymtabIndex = do
       throwError "Could not find object file symbol table."
     pure $ objShdrs V.! fromIntegral objSymtabIndex
 
-  let objSymtab :: BS.ByteString
-      objSymtab = getShdrContents objSymtabShdr objHeaderInfo
+  let
+    objSymtab :: BS.ByteString
+    objSymtab = getShdrContents objSymtabShdr objHeaderInfo
 
   -- Get object string table.
-  let objStrtabIdx :: Int
-      objStrtabIdx = fromIntegral (Elf.shdrLink objSymtabShdr)
+  let
+    objStrtabIdx :: Int
+    objStrtabIdx = fromIntegral (Elf.shdrLink objSymtabShdr)
   when (objStrtabIdx >= V.length objShdrs) $ do
     throwError "Invalid binary string table index."
 
-  let objStrtab :: BS.ByteString
-      objStrtab = getShdrContents (objShdrs V.! objStrtabIdx) objHeaderInfo
+  let
+    objStrtab :: BS.ByteString
+    objStrtab = getShdrContents (objShdrs V.! objStrtabIdx) objHeaderInfo
 
   case Elf.decodeSymtab cl elfDta objStrtab objSymtab of
     Left _e -> throwError "Could not parse object file symbol table."
@@ -683,23 +696,26 @@ mergeObject binHeaderInfo objName objContents ctx = runPureRelinkM $ do
   -- Code program header in binary
   let binCodePhdrIndex = Bin.eclCodePhdrIndex binLayout
 
-  let binPhdrs :: V.Vector (Elf.Phdr 64)
-      binPhdrs =
-        V.generate
-          (fromIntegral (Elf.phdrCount binHeaderInfo))
-          (Elf.phdrByIndex binHeaderInfo . fromIntegral)
+  let
+    binPhdrs :: V.Vector (Elf.Phdr 64)
+    binPhdrs =
+      V.generate
+        (fromIntegral (Elf.phdrCount binHeaderInfo))
+        (Elf.phdrByIndex binHeaderInfo . fromIntegral)
 
-  let binCodePhdr :: Elf.Phdr 64
-      binCodePhdr = binPhdrs V.! fromIntegral binCodePhdrIndex
+  let
+    binCodePhdr :: Elf.Phdr 64
+    binCodePhdr = binPhdrs V.! fromIntegral binCodePhdrIndex
 
   binShdrIndexInfo <- mkBinarySectionLayout binShdrs
 
   -- End of code section
-  let binCodeEndOffset :: Elf.FileOffset Word64
-      binCodeEndOffset =
-        Elf.incOffset
-          (Elf.phdrFileStart binCodePhdr)
-          (Elf.phdrFileSize binCodePhdr)
+  let
+    binCodeEndOffset :: Elf.FileOffset Word64
+    binCodeEndOffset =
+      Elf.incOffset
+        (Elf.phdrFileStart binCodePhdr)
+        (Elf.phdrFileSize binCodePhdr)
 
   -----------------------------------------------------------------------------
   -- 2. Collect object information.
@@ -716,8 +732,9 @@ mergeObject binHeaderInfo objName objContents ctx = runPureRelinkM $ do
   -- Check object assumptions
   checkObjectHeaderAssumptions objHdr
 
-  let objectNameInfoMap :: Map BS.ByteString ObjFunDef
-      objectNameInfoMap = mapFromFuns ofdObjName id (mrObjectFuns ctx)
+  let
+    objectNameInfoMap :: Map BS.ByteString ObjFunDef
+    objectNameInfoMap = mapFromFuns ofdObjName id (mrObjectFuns ctx)
 
   -- Get section headers for objects
   objShdrs <-
@@ -755,10 +772,12 @@ mergeObject binHeaderInfo objName objContents ctx = runPureRelinkM $ do
   objSymbols <- getObjectSymbols objHeaderInfo objShdrs (objinfoSymtab objInfo)
 
   -- Number of bytes in overflow sections
-  let codeOverflowSize :: Word64
-      codeOverflowSize = objOverflowSize objInfo
-  let rodataOverflowSize :: Word64
-      rodataOverflowSize = objRodataSize objInfo
+  let
+    codeOverflowSize :: Word64
+    codeOverflowSize = objOverflowSize objInfo
+  let
+    rodataOverflowSize :: Word64
+    rodataOverflowSize = objRodataSize objInfo
 
   let codeEndOff = Elf.incOffset (Elf.phdrFileStart binCodePhdr) (Elf.phdrFileSize binCodePhdr)
 
@@ -783,28 +802,30 @@ mergeObject binHeaderInfo objName objContents ctx = runPureRelinkM $ do
           Just idx -> pure (Just (fromIntegral idx :: Word16))
 
   -- Map section indices in binary to number of sections inserted before that section.
-  let insertedSectionIndices :: Map Word16 Word16
-      insertedSectionIndices = Map.fromList $
-        case codeOverflowShdrIndex of
-          Nothing ->
-            case rodataOverflowShdrIndex of
-              Nothing -> []
-              Just ridx -> [(ridx, 1)]
-          Just cidx ->
-            case rodataOverflowShdrIndex of
-              Nothing -> [(cidx, 1)]
-              Just ridx ->
-                case compare cidx ridx of
-                  LT -> [(cidx, 1), (ridx, 2)]
-                  EQ -> [(cidx, 2)]
-                  GT -> [(ridx, 1), (cidx, 2)]
+  let
+    insertedSectionIndices :: Map Word16 Word16
+    insertedSectionIndices = Map.fromList $
+      case codeOverflowShdrIndex of
+        Nothing ->
+          case rodataOverflowShdrIndex of
+            Nothing -> []
+            Just ridx -> [(ridx, 1)]
+        Just cidx ->
+          case rodataOverflowShdrIndex of
+            Nothing -> [(cidx, 1)]
+            Just ridx ->
+              case compare cidx ridx of
+                LT -> [(cidx, 1), (ridx, 2)]
+                EQ -> [(cidx, 2)]
+                GT -> [(ridx, 1), (cidx, 2)]
 
   -- Map a section heder in binary to new section
-  let binShdrIndexMap :: Word16 -> Word16
-      binShdrIndexMap i =
-        case Map.lookupLE i insertedSectionIndices of
-          Just (_, c) -> i + c
-          Nothing -> i
+  let
+    binShdrIndexMap :: Word16 -> Word16
+    binShdrIndexMap i =
+      case Map.lookupLE i insertedSectionIndices of
+        Just (_, c) -> i + c
+        Nothing -> i
 
   newSymtab <-
     if bslSymtabIndex binShdrIndexInfo == 0
@@ -813,20 +834,21 @@ mergeObject binHeaderInfo objName objContents ctx = runPureRelinkM $ do
         let addrToSec = mkAddrToSectionMap binShdrs
         -- Map symbol names in object file to new section index and offset
         -- within new section.
-        let addrOfObjSymbol :: BS.ByteString -> Maybe (New.NewSectionIndex, Word64)
-            addrOfObjSymbol nm = do
-              case Map.lookup nm (objinfoSymbolAddrMap objInfo) of
-                Nothing -> Nothing
-                Just (OrigBinaryAddr addr) -> do
-                  case Map.lookupLE addr addrToSec of
-                    Just (base, (sz, idx))
-                      | addr < base + sz ->
-                          Just (NewSectionIndex (binShdrIndexMap idx), addr - base)
-                    _ -> Nothing
-                Just (OverflowSection off) -> do
-                  case codeOverflowShdrIndex of
-                    Nothing -> error "internal: Did not expect function in overflow section."
-                    Just idx -> Just (NewSectionIndex idx, off)
+        let
+          addrOfObjSymbol :: BS.ByteString -> Maybe (New.NewSectionIndex, Word64)
+          addrOfObjSymbol nm = do
+            case Map.lookup nm (objinfoSymbolAddrMap objInfo) of
+              Nothing -> Nothing
+              Just (OrigBinaryAddr addr) -> do
+                case Map.lookupLE addr addrToSec of
+                  Just (base, (sz, idx))
+                    | addr < base + sz ->
+                        Just (NewSectionIndex (binShdrIndexMap idx), addr - base)
+                  _ -> Nothing
+              Just (OverflowSection off) -> do
+                case codeOverflowShdrIndex of
+                  Nothing -> error "internal: Did not expect function in overflow section."
+                  Just idx -> Just (NewSectionIndex idx, off)
         case runExcept $ mkNewSymtab ctx binHeaderInfo binShdrs (bslSymtabIndex binShdrIndexInfo) binShdrIndexMap objSymbols addrOfObjSymbol of
           Left e -> throwError e
           Right r -> pure (Just r)
@@ -835,53 +857,59 @@ mergeObject binHeaderInfo objName objContents ctx = runPureRelinkM $ do
   -- 3. Compute file layout
 
   -- Start of overflow section offset.
-  let overflowOffset :: Elf.FileOffset Word64
-      overflowOffset = Elf.alignFileOffset 16 binCodeEndOffset
+  let
+    overflowOffset :: Elf.FileOffset Word64
+    overflowOffset = Elf.alignFileOffset 16 binCodeEndOffset
   -- File offset for end of overflow
   let codeOverflowEndOffset = Elf.incOffset overflowOffset codeOverflowSize
 
   -- Number of bytes in padding between end of old code and overflow code section.
-  let overflowPadding :: Word64
-      overflowPadding = Elf.fromFileOffset overflowOffset - Elf.fromFileOffset binCodeEndOffset
+  let
+    overflowPadding :: Word64
+    overflowPadding = Elf.fromFileOffset overflowOffset - Elf.fromFileOffset binCodeEndOffset
 
   -- .shstrtab contents
-  let newShstrtabContents :: BS.ByteString
-      shstrtabOffsetMap :: Map BS.ByteString Word32
-      (newShstrtabContents, shstrtabOffsetMap) =
-        let binNames = Elf.shdrName <$> V.toList binShdrs
-            overflowCodeShdrNames
-              | codeOverflowSize > 0 = [newCodeSectionName]
-              | otherwise = []
-            overflowRodataShdrNames
-              | rodataOverflowSize > 0 = [newRodataSectionName]
-              | otherwise = []
-            allNames = binNames ++ overflowCodeShdrNames ++ overflowRodataShdrNames
-         in Elf.encodeStringTable allNames
+  let
+    newShstrtabContents :: BS.ByteString
+    shstrtabOffsetMap :: Map BS.ByteString Word32
+    (newShstrtabContents, shstrtabOffsetMap) =
+      let
+        binNames = Elf.shdrName <$> V.toList binShdrs
+        overflowCodeShdrNames
+          | codeOverflowSize > 0 = [newCodeSectionName]
+          | otherwise = []
+        overflowRodataShdrNames
+          | rodataOverflowSize > 0 = [newRodataSectionName]
+          | otherwise = []
+        allNames = binNames ++ overflowCodeShdrNames ++ overflowRodataShdrNames
+       in
+        Elf.encodeStringTable allNames
 
   -- Create file indices where new data is added.
-  let layoutSegmentAppends :: [(Int, Int)]
-      layoutSegmentAppends
-        | objRodataSize objInfo == 0 = do
-            let newCodeSize = Elf.fromFileOffset (codeOverflowEndOffset - binCodeEndOffset)
-            [(fromIntegral binCodeEndOffset, fromIntegral newCodeSize)]
-        | otherwise =
-            case Bin.eclRodataPhdrIndex binLayout of
-              -- No rodata -- put rodata after overflow.
-              Nothing -> do
-                let newRodataOffset = Elf.alignFileOffset 16 codeOverflowEndOffset
-                let newRodataEndOffset = Elf.incOffset newRodataOffset (objRodataSize objInfo)
-                let sz = fromIntegral $ newRodataEndOffset - binCodeEndOffset
-                [(fromIntegral binCodeEndOffset, sz)]
-              -- Separate rodata
-              Just rodataPhdrIdx -> do
-                let rodataEndOffset = phdrEndOff $ Elf.phdrByIndex binHeaderInfo rodataPhdrIdx
-                let newCodeSize = Elf.fromFileOffset $ codeOverflowEndOffset - binCodeEndOffset
-                let newRodataOffset = Elf.alignFileOffset 16 rodataEndOffset
-                let newRodataEndOffset = Elf.incOffset newRodataOffset (objRodataSize objInfo)
-                let newRodataSize = newRodataEndOffset - rodataEndOffset
-                [ (fromIntegral binCodeEndOffset, fromIntegral newCodeSize)
-                  , (fromIntegral rodataEndOffset, fromIntegral newRodataSize)
-                  ]
+  let
+    layoutSegmentAppends :: [(Int, Int)]
+    layoutSegmentAppends
+      | objRodataSize objInfo == 0 = do
+          let newCodeSize = Elf.fromFileOffset (codeOverflowEndOffset - binCodeEndOffset)
+          [(fromIntegral binCodeEndOffset, fromIntegral newCodeSize)]
+      | otherwise =
+          case Bin.eclRodataPhdrIndex binLayout of
+            -- No rodata -- put rodata after overflow.
+            Nothing -> do
+              let newRodataOffset = Elf.alignFileOffset 16 codeOverflowEndOffset
+              let newRodataEndOffset = Elf.incOffset newRodataOffset (objRodataSize objInfo)
+              let sz = fromIntegral $ newRodataEndOffset - binCodeEndOffset
+              [(fromIntegral binCodeEndOffset, sz)]
+            -- Separate rodata
+            Just rodataPhdrIdx -> do
+              let rodataEndOffset = phdrEndOff $ Elf.phdrByIndex binHeaderInfo rodataPhdrIdx
+              let newCodeSize = Elf.fromFileOffset $ codeOverflowEndOffset - binCodeEndOffset
+              let newRodataOffset = Elf.alignFileOffset 16 rodataEndOffset
+              let newRodataEndOffset = Elf.incOffset newRodataOffset (objRodataSize objInfo)
+              let newRodataSize = newRodataEndOffset - rodataEndOffset
+              [ (fromIntegral binCodeEndOffset, fromIntegral newCodeSize)
+                , (fromIntegral rodataEndOffset, fromIntegral newRodataSize)
+                ]
 
   -- Create new binary layout
   newBinLayout <- do
@@ -921,48 +949,53 @@ mergeObject binHeaderInfo objName objContents ctx = runPureRelinkM $ do
 
   -- Address of start of overflow section.
   -- This is the of the binary code segment rounded up to nearest multiple of 16.
-  let codeOverflowAddr :: Word64
-      codeOverflowAddr = codeEndAddr + overflowPadding
-  let codeOverflowEndAddr :: Word64
-      codeOverflowEndAddr = codeOverflowAddr + codeOverflowSize
+  let
+    codeOverflowAddr :: Word64
+    codeOverflowAddr = codeEndAddr + overflowPadding
+  let
+    codeOverflowEndAddr :: Word64
+    codeOverflowEndAddr = codeOverflowAddr + codeOverflowSize
 
   -- rodataOverflowEndOffAndAddr
-  let rodataOverflowEndOffAndAddr :: Maybe (Elf.FileOffset Word64, Word64)
-      rodataOverflowEndOffAndAddr
-        | objRodataSize objInfo == 0 = Nothing
-        | otherwise =
-            case Bin.eclRodataPhdrIndex binLayout of
-              -- No rodata -- put rodata after overflow.
-              Nothing -> do
-                let newRodataOffset = Elf.alignFileOffset 16 codeOverflowEndOffset
-                let padding = Elf.fromFileOffset (newRodataOffset - codeOverflowEndOffset)
-                Just (codeOverflowEndOffset, codeOverflowEndAddr + padding)
-              -- Separate rodata
-              Just rodataPhdrIdx -> do
-                let rodataPhdr = Elf.phdrByIndex binHeaderInfo rodataPhdrIdx
-                let rodataAddr = Elf.phdrSegmentVirtAddr rodataPhdr
-                let rodataOffset = Elf.phdrFileStart rodataPhdr
-                let rodataEndOffset = Elf.incOffset rodataOffset (Elf.phdrFileSize rodataPhdr)
-                let newRodataOffset = Elf.alignFileOffset 16 rodataEndOffset
-                let size = Elf.fromFileOffset (newRodataOffset - rodataOffset)
-                Just (rodataEndOffset, rodataAddr + size)
+  let
+    rodataOverflowEndOffAndAddr :: Maybe (Elf.FileOffset Word64, Word64)
+    rodataOverflowEndOffAndAddr
+      | objRodataSize objInfo == 0 = Nothing
+      | otherwise =
+          case Bin.eclRodataPhdrIndex binLayout of
+            -- No rodata -- put rodata after overflow.
+            Nothing -> do
+              let newRodataOffset = Elf.alignFileOffset 16 codeOverflowEndOffset
+              let padding = Elf.fromFileOffset (newRodataOffset - codeOverflowEndOffset)
+              Just (codeOverflowEndOffset, codeOverflowEndAddr + padding)
+            -- Separate rodata
+            Just rodataPhdrIdx -> do
+              let rodataPhdr = Elf.phdrByIndex binHeaderInfo rodataPhdrIdx
+              let rodataAddr = Elf.phdrSegmentVirtAddr rodataPhdr
+              let rodataOffset = Elf.phdrFileStart rodataPhdr
+              let rodataEndOffset = Elf.incOffset rodataOffset (Elf.phdrFileSize rodataPhdr)
+              let newRodataOffset = Elf.alignFileOffset 16 rodataEndOffset
+              let size = Elf.fromFileOffset (newRodataOffset - rodataOffset)
+              Just (rodataEndOffset, rodataAddr + size)
 
   -- Compute information needed to resolve relocations in object file.
   objRelocInfo <- do
-    let addrOfObjSec :: ObjectSectionIndex -> Maybe Word64
-        addrOfObjSec idx =
-          case Map.lookup idx (objSectionAddrMap objInfo) of
-            Nothing -> Nothing
-            Just (BinAddr a) -> Just a
-            Just (OverflowAddr o) -> Just (codeOverflowEndAddr + o)
-            Just (RodataAddr o) ->
-              case rodataOverflowEndOffAndAddr of
-                Nothing -> error "Unexpected rodata address."
-                Just (_, a) -> Just (a + o)
-    let undefAddrMap :: Map BS.ByteString Word64
-        undefAddrMap =
-          let ins m r = Map.insert (ofrObjName r) (ofrBinAddr r) m
-           in foldl' ins Map.empty (mrUndefinedFuns ctx)
+    let
+      addrOfObjSec :: ObjectSectionIndex -> Maybe Word64
+      addrOfObjSec idx =
+        case Map.lookup idx (objSectionAddrMap objInfo) of
+          Nothing -> Nothing
+          Just (BinAddr a) -> Just a
+          Just (OverflowAddr o) -> Just (codeOverflowEndAddr + o)
+          Just (RodataAddr o) ->
+            case rodataOverflowEndOffAndAddr of
+              Nothing -> error "Unexpected rodata address."
+              Just (_, a) -> Just (a + o)
+    let
+      undefAddrMap :: Map BS.ByteString Word64
+      undefAddrMap =
+        let ins m r = Map.insert (ofrObjName r) (ofrBinAddr r) m
+         in foldl' ins Map.empty (mrUndefinedFuns ctx)
     case mkRelocInfo (`Map.lookup` undefAddrMap) addrOfObjSec objSymbols objShdrs of
       Left err -> throwError $ "Object file error: " ++ err
       Right r -> pure r
@@ -979,86 +1012,91 @@ mergeObject binHeaderInfo objName objContents ctx = runPureRelinkM $ do
         generateOverflowSection objHeaderInfo objShdrs objRelocInfo (NewAddr addr) overflowSections
 
   -- List of program headers, new size and contents
-  let phdrAppends :: [(Word16, Word64, [(Word64, Bld.Builder)])]
-      phdrAppends
-        | rodataOverflowSize == 0 = do
-            let sz = Elf.fromFileOffset (codeOverflowEndOffset - Elf.phdrFileStart binCodePhdr)
-            [(binCodePhdrIndex, sz, [(codeOverflowSize, objOverflowCode)])]
-        | otherwise =
-            case Bin.eclRodataPhdrIndex binLayout of
-              -- No rodata -- put rodata after overflow.
-              Nothing -> do
-                let newRodataOffset = Elf.alignFileOffset 16 codeOverflowEndOffset
-                let newRodataEndOffset = Elf.incOffset newRodataOffset (objRodataSize objInfo)
-                [
-                  ( binCodePhdrIndex
-                  , Elf.fromFileOffset (newRodataEndOffset - Elf.phdrFileStart binCodePhdr)
-                  , [(codeOverflowSize, objOverflowCode), (objRodataSize objInfo, newRodataContents)]
-                  )
-                  ]
-              -- Separate rodata
-              Just rodataPhdrIdx -> do
-                let rodataPhdr = Elf.phdrByIndex binHeaderInfo rodataPhdrIdx
-                let rodataEndOffset = phdrEndOff rodataPhdr
-                let newRodataOffset = Elf.alignFileOffset 16 rodataEndOffset
-                let newRodataEndOffset = Elf.incOffset newRodataOffset (objRodataSize objInfo)
-                [
-                  ( binCodePhdrIndex
-                  , Elf.fromFileOffset (codeOverflowEndOffset - Elf.phdrFileStart binCodePhdr)
-                  , [(codeOverflowSize, objOverflowCode)]
-                  )
+  let
+    phdrAppends :: [(Word16, Word64, [(Word64, Bld.Builder)])]
+    phdrAppends
+      | rodataOverflowSize == 0 = do
+          let sz = Elf.fromFileOffset (codeOverflowEndOffset - Elf.phdrFileStart binCodePhdr)
+          [(binCodePhdrIndex, sz, [(codeOverflowSize, objOverflowCode)])]
+      | otherwise =
+          case Bin.eclRodataPhdrIndex binLayout of
+            -- No rodata -- put rodata after overflow.
+            Nothing -> do
+              let newRodataOffset = Elf.alignFileOffset 16 codeOverflowEndOffset
+              let newRodataEndOffset = Elf.incOffset newRodataOffset (objRodataSize objInfo)
+              [
+                ( binCodePhdrIndex
+                , Elf.fromFileOffset (newRodataEndOffset - Elf.phdrFileStart binCodePhdr)
+                , [(codeOverflowSize, objOverflowCode), (objRodataSize objInfo, newRodataContents)]
+                )
+                ]
+            -- Separate rodata
+            Just rodataPhdrIdx -> do
+              let rodataPhdr = Elf.phdrByIndex binHeaderInfo rodataPhdrIdx
+              let rodataEndOffset = phdrEndOff rodataPhdr
+              let newRodataOffset = Elf.alignFileOffset 16 rodataEndOffset
+              let newRodataEndOffset = Elf.incOffset newRodataOffset (objRodataSize objInfo)
+              [
+                ( binCodePhdrIndex
+                , Elf.fromFileOffset (codeOverflowEndOffset - Elf.phdrFileStart binCodePhdr)
+                , [(codeOverflowSize, objOverflowCode)]
+                )
+                ,
+                  ( rodataPhdrIdx
+                  , Elf.fromFileOffset (newRodataEndOffset - Elf.phdrFileStart rodataPhdr)
                   ,
-                    ( rodataPhdrIdx
-                    , Elf.fromFileOffset (newRodataEndOffset - Elf.phdrFileStart rodataPhdr)
-                    ,
-                      [ (objRodataSize objInfo, newRodataContents)
-                      ]
-                    )
-                  ]
+                    [ (objRodataSize objInfo, newRodataContents)
+                    ]
+                  )
+                ]
 
   -- Return offset in new .shstrtab of name
-  let shdrNameFn :: BS.ByteString -> Word32
-      shdrNameFn nm =
-        let msg = "internal failure: Missing section header name."
-         in Map.findWithDefault (error msg) nm shstrtabOffsetMap
+  let
+    shdrNameFn :: BS.ByteString -> Word32
+    shdrNameFn nm =
+      let msg = "internal failure: Missing section header name."
+       in Map.findWithDefault (error msg) nm shstrtabOffsetMap
 
   -- Map from section indices to contents to insert before them.
-  let insSecMap :: Map Word16 [Elf.Shdr Word32 Word64]
-      insSecMap = Map.fromList $ do
-        let mcodeShdr =
-              case codeOverflowShdrIndex of
-                Nothing -> Nothing
-                Just idx ->
-                  let codeShdr =
-                        New.newBinaryCodeSection
-                          (shdrNameFn newCodeSectionName)
-                          (Elf.shf_alloc .|. Elf.shf_execinstr)
-                          codeOverflowAddr
-                          binCodeEndOffset
-                          codeOverflowSize
-                   in Just (idx, codeShdr)
-        let mrodataShdr =
-              case (rodataOverflowShdrIndex, rodataOverflowEndOffAndAddr) of
-                (Just idx, Just (endOff, addr)) ->
-                  let off = Elf.alignFileOffset 16 endOff
-                      nm = shdrNameFn newRodataSectionName
-                      sz = rodataOverflowSize
-                      shdr = New.newBinaryCodeSection nm Elf.shf_alloc addr off sz
-                   in Just (idx, shdr)
-                _ -> Nothing
-        case mcodeShdr of
-          Nothing ->
-            case mrodataShdr of
-              Nothing -> []
-              Just (ridx, rshdr) -> [(ridx, [rshdr])]
-          Just (cidx, cshdr) -> do
-            case mrodataShdr of
-              Nothing -> [(cidx, [cshdr])]
-              Just (ridx, rshdr) ->
-                case compare cidx ridx of
-                  LT -> [(,) cidx [cshdr], (,) ridx [rshdr]]
-                  EQ -> [(,) cidx [cshdr, rshdr]]
-                  GT -> [(,) ridx [rshdr], (,) cidx [cshdr]]
+  let
+    insSecMap :: Map Word16 [Elf.Shdr Word32 Word64]
+    insSecMap = Map.fromList $ do
+      let mcodeShdr =
+            case codeOverflowShdrIndex of
+              Nothing -> Nothing
+              Just idx ->
+                let codeShdr =
+                      New.newBinaryCodeSection
+                        (shdrNameFn newCodeSectionName)
+                        (Elf.shf_alloc .|. Elf.shf_execinstr)
+                        codeOverflowAddr
+                        binCodeEndOffset
+                        codeOverflowSize
+                 in Just (idx, codeShdr)
+      let mrodataShdr =
+            case (rodataOverflowShdrIndex, rodataOverflowEndOffAndAddr) of
+              (Just idx, Just (endOff, addr)) ->
+                let
+                  off = Elf.alignFileOffset 16 endOff
+                  nm = shdrNameFn newRodataSectionName
+                  sz = rodataOverflowSize
+                  shdr = New.newBinaryCodeSection nm Elf.shf_alloc addr off sz
+                 in
+                  Just (idx, shdr)
+              _ -> Nothing
+      case mcodeShdr of
+        Nothing ->
+          case mrodataShdr of
+            Nothing -> []
+            Just (ridx, rshdr) -> [(ridx, [rshdr])]
+        Just (cidx, cshdr) -> do
+          case mrodataShdr of
+            Nothing -> [(cidx, [cshdr])]
+            Just (ridx, rshdr) ->
+              case compare cidx ridx of
+                LT -> [(,) cidx [cshdr], (,) ridx [rshdr]]
+                EQ -> [(,) cidx [cshdr, rshdr]]
+                GT -> [(,) ridx [rshdr], (,) cidx [cshdr]]
 
   -- Compute context for new binary layout.
   let newBuildCtx =
@@ -1076,9 +1114,11 @@ mergeObject binHeaderInfo objName objContents ctx = runPureRelinkM $ do
           , New.bctxAppendMap =
               Map.fromList $
                 let f (idx, _, l) =
-                      let p = Elf.phdrByIndex binHeaderInfo idx
-                          endOff = Elf.incOffset (Elf.phdrFileStart p) (Elf.phdrFileSize p)
-                       in (endOff, l)
+                      let
+                        p = Elf.phdrByIndex binHeaderInfo idx
+                        endOff = Elf.incOffset (Elf.phdrFileStart p) (Elf.phdrFileSize p)
+                       in
+                        (endOff, l)
                  in f <$> phdrAppends
           , New.bctxNewSymtab = newSymtab
           , New.bctxFileOffsetFn = New.nblFindNewOffset newBinLayout

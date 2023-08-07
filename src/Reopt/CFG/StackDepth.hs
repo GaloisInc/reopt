@@ -127,9 +127,11 @@ minimizeStackDepthValues = Set.fromList . Set.fold go [] . Set.map discardPositi
   discardPositive v = v{dynamicPart = Set.filter isNegativeDepth (dynamicPart v)}
   -- FIXME: can we use ordering to simplify this?
   go v xs =
-    let (_subs, xs') = partition (subsumes v) xs
-        dominated = any (`subsumes` v) xs'
-     in if not dominated then v : xs' else xs'
+    let
+      (_subs, xs') = partition (subsumes v) xs
+      dominated = any (`subsumes` v) xs'
+     in
+      if not dominated then v : xs' else xs'
 
 -- -----------------------------------------------------------------------------
 
