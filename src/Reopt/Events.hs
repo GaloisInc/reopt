@@ -345,23 +345,26 @@ heraldLength = 11
 -- | Displays output with the wanted herald.  Currently would look something like:
 --
 --   [HERALD] THING
-withHerald :: String -> String -> String
-withHerald herald = (printf formatString ("[" <> heraldText <> "] ") <>)
+withHerald :: String -> String -> IO ()
+withHerald herald = hPutStrLn stderr . (printf formatString ("[" <> heraldText <> "] ") <>)
   where
     -- NOTE: 3 accounts for '[' and '] '
     heraldText = take (heraldLength - 3) herald
     formatString = "%-" <> show heraldLength <> "s"
 
-logBeginOf :: String -> String
+logBeginOf :: String -> IO ()
 logBeginOf = withHerald "BEGIN"
 
-logEndOf :: String -> String
+logEndOf :: String -> IO ()
 logEndOf = withHerald "END"
 
-logStepOf :: String -> String
-logStepOf = withHerald "STEP"
+logError :: String -> IO ()
+logError = withHerald "ERROR"
 
-logWarning :: String -> String
+logStep :: String -> IO ()
+logStep = withHerald "STEP"
+
+logWarning :: String -> IO ()
 logWarning = withHerald "WARNING"
 
 -- | Function for recovering log information.
@@ -374,17 +377,17 @@ printLogEvent ::
 printLogEvent event = do
   case event of
     ReoptGlobalStepStarted s ->
-      hPutStrLn stderr $ logBeginOf $ ppGlobalStep s
+      logBeginOf $ ppGlobalStep s
     ReoptGlobalStepFinished s _ ->
-      hPutStrLn stderr $ logEndOf $ ppGlobalStep s
+      logEndOf $ ppGlobalStep s
     ReoptGlobalStepWarning _st msg ->
-      hPutStrLn stderr $ logWarning msg
+      logWarning msg
     ReoptFunStepStarted s f ->
-      hPutStrLn stderr $ logBeginOf $ printf "%s function %s" (ppFunStep s) (ppFunId f)
+      logBeginOf $ printf "%s function %s" (ppFunStep s) (ppFunId f)
     ReoptFunStepFinished s f _ ->
-      hPutStrLn stderr $ logEndOf $ printf "%s function %s" (ppFunStep s) (ppFunId f)
+      logEndOf $ printf "%s function %s" (ppFunStep s) (ppFunId f)
     ReoptFunStepFailed s _ e ->
-      hPutStrLn stderr $
+      logError $
         case s of
           Discovery ->
             unlines $
@@ -407,7 +410,7 @@ printLogEvent event = do
           AnnotationGeneration ->
             printf "  %s" e
     ReoptFunStepLog _st _f msg ->
-      hPutStrLn stderr $ logStepOf msg
+      logStep msg
     ReoptFunStepAllFinished _ _ ->
       pure ()
 
