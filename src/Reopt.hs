@@ -218,6 +218,7 @@ import Data.Parameterized.Some (Some (..))
 import Data.Parameterized.TraversableF (FoldableF)
 import Data.Set qualified as Set
 import Data.String (IsString (..))
+import qualified Data.Text as T
 import Data.Vector qualified as V
 import Data.Word (Word16, Word32, Word64)
 import Flexdis86 qualified as F
@@ -616,14 +617,15 @@ checkBlockError b = do
           , Events.discErrorBlockInsnIndex = length (Macaw.pblockStmts b)
           , Events.discErrorMessage = msg
           }
-    Macaw.ClassifyFailure _ _ ->
+    Macaw.ClassifyFailure _ reasons ->
       Just $!
         Events.DiscoveryError
           { Events.discErrorTag = Events.DiscoveryClassErrorTag
           , Events.discErrorBlockAddr = a
           , Events.discErrorBlockSize = Macaw.blockSize b
           , Events.discErrorBlockInsnIndex = length (Macaw.pblockStmts b)
-          , Events.discErrorMessage = "Unclassified control flow transfer."
+          , Events.discErrorMessage = "Unclassified control flow transfer.\n"
+              <> T.intercalate "\n" (map (T.pack . ("→ " <>)) reasons)
           }
     _ -> Nothing
 

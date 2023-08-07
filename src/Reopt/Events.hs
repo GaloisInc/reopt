@@ -348,15 +348,15 @@ printLogEvent ::
 printLogEvent event = do
   case event of
     ReoptGlobalStepStarted s ->
-      hPutStrLn stderr $ ppGlobalStep s
-    ReoptGlobalStepFinished _ _ ->
-      hPutStrLn stderr $ printf "  Complete."
+      hPutStrLn stderr $ printf "  [BEGIN] %s" (ppGlobalStep s)
+    ReoptGlobalStepFinished s _ ->
+      hPutStrLn stderr $ printf "  [ END ] %s." (ppGlobalStep s)
     ReoptGlobalStepWarning _st msg ->
-      hPutStrLn stderr $ printf "  %s" msg
+      hPutStrLn stderr $ printf "  [ WARN] %s" msg
     ReoptFunStepStarted s f ->
-      hPutStrLn stderr $ ppFunStep s ++ " " ++ ppFunId f
-    ReoptFunStepFinished{} ->
-      hPutStrLn stderr $ printf "  Complete."
+      hPutStrLn stderr $ printf "  [BEGIN] %s for function %s" (ppFunStep s) (ppFunId f)
+    ReoptFunStepFinished s f _ ->
+      hPutStrLn stderr $ printf "  [ END ] %s for function %s" (ppFunStep s) (ppFunId f)
     ReoptFunStepFailed s _ e ->
       hPutStrLn stderr $
         case s of
