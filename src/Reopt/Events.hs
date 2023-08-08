@@ -347,10 +347,10 @@ heraldLength = 11
 --   [HERALD] THING
 withHerald :: String -> String -> IO ()
 withHerald herald = hPutStrLn stderr . (printf formatString ("[" <> heraldText <> "] ") <>)
-  where
-    -- NOTE: 3 accounts for '[' and '] '
-    heraldText = take (heraldLength - 3) herald
-    formatString = "%-" <> show heraldLength <> "s"
+ where
+  -- NOTE: 3 accounts for '[' and '] '
+  heraldText = take (heraldLength - 3) herald
+  formatString = "%-" <> show heraldLength <> "s"
 
 logBeginOf :: String -> IO ()
 logBeginOf = withHerald "BEGIN"
@@ -775,9 +775,11 @@ summaryRows stats = map toCsvRow $ Map.toList $ summaryFnResults stats
  where
   toCsvRow :: (FunId, FnRecoveryResult) -> [String]
   toCsvRow (FunId faddr nm, res) =
-    let name = BS.unpack nm
-        hexAddr = "0x" ++ showHex faddr ""
-     in [summaryBinaryPath stats, name, hexAddr, show res]
+    let
+      name = BS.unpack nm
+      hexAddr = "0x" ++ showHex faddr ""
+     in
+      [summaryBinaryPath stats, name, hexAddr, show res]
 
 -- | Function for updating statistics using events capturing during run.
 recoverLogEvent ::

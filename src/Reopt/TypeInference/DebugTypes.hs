@@ -251,11 +251,13 @@ resolveDwarfSubprogramDebugName sub moff
       case moff of
         Nothing -> Nothing
         Just o ->
-          let nmVal :: String
-              nmVal
-                | Dwarf.subName sub == "" = "Unnamed function"
-                | otherwise = BSC.unpack (Dwarf.nameVal (Dwarf.subName sub))
-           in Just $! printf "%s (0x%x)" nmVal (toInteger o)
+          let
+            nmVal :: String
+            nmVal
+              | Dwarf.subName sub == "" = "Unnamed function"
+              | otherwise = BSC.unpack (Dwarf.nameVal (Dwarf.subName sub))
+           in
+            Just $! printf "%s (0x%x)" nmVal (toInteger o)
 
 -- | Resolve type information from subroutine.
 resolveSubprogramType ::
@@ -275,8 +277,9 @@ resolveSubprogramType cu annMap sub entryAddr
   -- Var args functions have a special usage.
   | Dwarf.subUnspecifiedParams sub = do
       -- Get name as an external symbol
-      let externalName :: Maybe BSC.ByteString
-          externalName = dwarfExternalName sub
+      let
+        externalName :: Maybe BSC.ByteString
+        externalName = dwarfExternalName sub
       -- Get entry address in terms of memory.
       case resolveDwarfSubprogramDebugName sub (dwarfSubEntry sub) of
         Nothing -> pure annMap
@@ -286,8 +289,9 @@ resolveSubprogramType cu annMap sub entryAddr
           pure annMap
   | otherwise = do
       -- Get name as an external symbol
-      let externalName :: Maybe BSC.ByteString
-          externalName = dwarfExternalName sub
+      let
+        externalName :: Maybe BSC.ByteString
+        externalName = dwarfExternalName sub
       -- Get origin if this is an inlined or specialized instance of a source subprogram.
       let emorigin =
             case Dwarf.subOrigin sub of
@@ -393,19 +397,20 @@ resolveDebugFunTypes ::
   IncCompM (ReoptLogEvent arch) r (FunTypeMaps (ArchAddrWidth arch))
 resolveDebugFunTypes resolveFn annMap elfInfo = do
   let hdr = Elf.header elfInfo
-  let secDataMap ::
-        Map
-          BSC.ByteString
-          [ ( Elf.FileRange (Elf.ElfWordType (ArchAddrWidth arch))
-            , Elf.ElfSection (Elf.ElfWordType (ArchAddrWidth arch))
-            )
-          ]
-      secDataMap =
-        Map.fromListWith
-          (++)
-          [ (Elf.elfSectionName sec, [(r, sec)])
-          | (r, sec) <- V.toList (Elf.headerSections elfInfo)
-          ]
+  let
+    secDataMap ::
+      Map
+        BSC.ByteString
+        [ ( Elf.FileRange (Elf.ElfWordType (ArchAddrWidth arch))
+          , Elf.ElfSection (Elf.ElfWordType (ArchAddrWidth arch))
+          )
+        ]
+    secDataMap =
+      Map.fromListWith
+        (++)
+        [ (Elf.elfSectionName sec, [(r, sec)])
+        | (r, sec) <- V.toList (Elf.headerSections elfInfo)
+        ]
   case Map.findWithDefault [] ".debug_info" secDataMap of
     [] -> do
       -- No debug information

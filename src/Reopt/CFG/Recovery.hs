@@ -1045,12 +1045,13 @@ recoverJumpTarget retVarMap tgtAddr = do
   let postValues =
         let emsg = "Could not find post values for target."
          in Map.findWithDefault (error emsg) thisAddr (biPredPostValues tgtInv)
-  let recoverVec ::
-        Some (BoundLoc X86Reg) ->
-        Recover ids (Some (FnValue X86_64))
-      recoverVec (Some (RegLoc r))
-        | Just v <- MapF.lookup r retVarMap = pure (Some v)
-      recoverVec (Some l) = resolveInferValue tgtAddr postValues l
+  let
+    recoverVec ::
+      Some (BoundLoc X86Reg) ->
+      Recover ids (Some (FnValue X86_64))
+    recoverVec (Some (RegLoc r))
+      | Just v <- MapF.lookup r retVarMap = pure (Some v)
+    recoverVec (Some l) = resolveInferValue tgtAddr postValues l
   values <- traverse recoverVec (V.fromList (biPhiLocs tgtInv))
   pure $!
     FnJumpTarget
@@ -1190,21 +1191,23 @@ inferRetRegRelations (retInfo P.:< P.Nil) =
               }
        in Just (Some frv)
 inferRetRegRelations fields =
-  let insField ::
-        P.Index fields tp ->
-        X86RetInfo tp ->
-        MapF X86Reg (RetRegRelation (TupleType fields)) ->
-        MapF X86Reg (RetRegRelation (TupleType fields))
-      insField idx retInfo m =
-        case retInfoRegPair retInfo of
-          Pair reg fieldRegRel ->
-            MapF.insert reg (RetRegRelation (IndexField idx) fieldRegRel) m
-      frv =
-        RetRegRelations
-          { fnRetValuesType = TupleTypeRepr (fmapFC typeRepr fields)
-          , fnRetValueMap = P.ifoldr insField MapF.empty fields
-          }
-   in Just (Some frv)
+  let
+    insField ::
+      P.Index fields tp ->
+      X86RetInfo tp ->
+      MapF X86Reg (RetRegRelation (TupleType fields)) ->
+      MapF X86Reg (RetRegRelation (TupleType fields))
+    insField idx retInfo m =
+      case retInfoRegPair retInfo of
+        Pair reg fieldRegRel ->
+          MapF.insert reg (RetRegRelation (IndexField idx) fieldRegRel) m
+    frv =
+      RetRegRelations
+        { fnRetValuesType = TupleTypeRepr (fmapFC typeRepr fields)
+        , fnRetValueMap = P.ifoldr insField MapF.empty fields
+        }
+   in
+    Just (Some frv)
 
 getRetField ::
   FnValue X86_64 retType ->
@@ -1357,18 +1360,19 @@ recoverBlock b = do
                 v <- mkReturnVar tp
                 addFnStmt (FnCall callTarget args (Just (Some v)))
                 let rv = FnReturn v
-                let g ::
-                      forall fields tp.
-                      P.List TypeRepr fields ->
-                      FnValue X86_64 (TupleType fields) ->
-                      MapF X86Reg (FnValue X86_64) ->
-                      P.Index fields tp ->
-                      EmbeddingInv X86Reg tp ->
-                      Recover ids (MapF X86Reg (FnValue X86_64))
-                    g flds s m idx (EmbeddingInv emb r) = do
-                      fv <- evalAssignRhs $ FnEvalApp $ TupleField flds s idx
-                      v' <- coerceRegValue (EmbeddingApp fv emb)
-                      pure $! MapF.insert r v' m
+                let
+                  g ::
+                    forall fields tp.
+                    P.List TypeRepr fields ->
+                    FnValue X86_64 (TupleType fields) ->
+                    MapF X86Reg (FnValue X86_64) ->
+                    P.Index fields tp ->
+                    EmbeddingInv X86Reg tp ->
+                    Recover ids (MapF X86Reg (FnValue X86_64))
+                  g flds s m idx (EmbeddingInv emb r) = do
+                    fv <- evalAssignRhs $ FnEvalApp $ TupleField flds s idx
+                    v' <- coerceRegValue (EmbeddingApp fv emb)
+                    pure $! MapF.insert r v' m
                 P.ifoldlM (g fieldTypes rv) MapF.empty retEmbeddings
       FnJump <$> recoverJumpTarget retMap retAddr
     PLTStub{} -> do
@@ -1702,21 +1706,25 @@ inferPrintfArgs mem nm regs initState = do
     Left msg -> Left $ "printf error: " ++ show s ++ "\n" ++ msg
     Right pas -> do
       -- Type in declaration
-      let funType :: FunctionType X86_64
-          funType = do
-            let declArgTypes = argRegTypeRepr <$> reverse (pasArgRegs initState')
-            FunctionType
-              { fnArgTypes = declArgTypes
-              , fnReturnType = Just (Some (BVTypeRepr n64))
-              , fnVarArgs = True
-              }
-      let fnEntry :: FnValue X86_64 (BVType 64)
-          fnEntry = FnFunctionEntryValue funType nm
+      let
+        funType :: FunctionType X86_64
+        funType = do
+          let declArgTypes = argRegTypeRepr <$> reverse (pasArgRegs initState')
+          FunctionType
+            { fnArgTypes = declArgTypes
+            , fnReturnType = Just (Some (BVTypeRepr n64))
+            , fnVarArgs = True
+            }
+      let
+        fnEntry :: FnValue X86_64 (BVType 64)
+        fnEntry = FnFunctionEntryValue funType nm
 
-      let x86ArgInfo :: [X86ArgInfo]
-          x86ArgInfo = reverse (pasArgRegs pas)
-      let x86RetInfo :: [Some X86RetInfo]
-          x86RetInfo = [Some (RetBV64 F.RAX)]
+      let
+        x86ArgInfo :: [X86ArgInfo]
+        x86ArgInfo = reverse (pasArgRegs pas)
+      let
+        x86RetInfo :: [Some X86RetInfo]
+        x86RetInfo = [Some (RetBV64 F.RAX)]
       Right $
         CallRegs
           { callRegsFnType = (fnEntry, x86ArgInfo, x86RetInfo)
@@ -1746,13 +1754,15 @@ mkX86FunctionType (X86PrintfFunType icnt0) =
         , fnVarArgs = True
         }
 mkX86FunctionType X86OpenFunType =
-  let stringPtrType = BVTypeRepr n64
-      intType = BVTypeRepr n64
-   in FunctionType
-        { fnArgTypes = [Some stringPtrType, Some intType]
-        , fnReturnType = Just (Some intType)
-        , fnVarArgs = True
-        }
+  let
+    stringPtrType = BVTypeRepr n64
+    intType = BVTypeRepr n64
+   in
+    FunctionType
+      { fnArgTypes = [Some stringPtrType, Some intType]
+      , fnReturnType = Just (Some intType)
+      , fnVarArgs = True
+      }
 
 x86TranslateCallType ::
   Memory 64 ->
@@ -1804,10 +1814,12 @@ x86TranslateCallType _mem nm regs x86Ftp@X86OpenFunType = do
   -- Get number of arguments for open
   let argCnt = if isCreat then 3 else 2
 
-  let args :: [X86ArgInfo]
-      args = fmap ArgBV64 (take argCnt x86GPPArgumentRegs)
-  let rets :: [Some X86RetInfo]
-      rets = [Some (RetBV64 F.RAX)]
+  let
+    args :: [X86ArgInfo]
+    args = fmap ArgBV64 (take argCnt x86GPPArgumentRegs)
+  let
+    rets :: [Some X86RetInfo]
+    rets = [Some (RetBV64 F.RAX)]
   Right
     CallRegs
       { callRegsFnType = (v, args, rets)
@@ -1959,33 +1971,36 @@ recoverFunction sysp mem fInfo invMap nm curArgs curRets = do
     let entryBlk = fromJust $ Map.lookup entryAddr (fInfo ^. parsedBlocks)
 
     -- Insert uninitialized register into initial block location map.
-    let insUninit ::
-          Pair X86Reg (FnRegValue X86_64) ->
-          MapF (BoundLoc X86Reg) (FnRegValue X86_64) ->
-          MapF (BoundLoc X86Reg) (FnRegValue X86_64)
-        insUninit (Pair r v) = MapF.insertWith (\_n old -> old) (RegLoc r) v
+    let
+      insUninit ::
+        Pair X86Reg (FnRegValue X86_64) ->
+        MapF (BoundLoc X86Reg) (FnRegValue X86_64) ->
+        MapF (BoundLoc X86Reg) (FnRegValue X86_64)
+      insUninit (Pair r v) = MapF.insertWith (\_n old -> old) (RegLoc r) v
     -- Compute registers for first block
-    let locMap :: MapF (BoundLoc X86Reg) (FnRegValue X86_64)
-        locMap =
-          MapF.empty
-            -- Set df to 0 at function start.
-            & MapF.insert (RegLoc DF) (mkIdentEmbeddingApp (FnConstantBool False))
-            -- Populate used arguments.
-            & initializeArgumentValues curArgs
-            -- Populate unused registers with default values.
-            & flip (foldr insUninit) uninitRegs
+    let
+      locMap :: MapF (BoundLoc X86Reg) (FnRegValue X86_64)
+      locMap =
+        MapF.empty
+          -- Set df to 0 at function start.
+          & MapF.insert (RegLoc DF) (mkIdentEmbeddingApp (FnConstantBool False))
+          -- Populate used arguments.
+          & initializeArgumentValues curArgs
+          -- Populate unused registers with default values.
+          & flip (foldr insUninit) uninitRegs
 
     entryInv <- getBlockInvariants entryAddr
     recoveredEntryBlk <- evalRecover entryBlk entryInv [] V.empty locMap
 
     -- Recover all blocks after first.
-    let recoverBlk ::
-          MemSegmentOff 64 ->
-          ParsedBlock X86_64 ids ->
-          FunRecover ids (Maybe (FnBlock X86_64))
-        recoverBlk a blk
-          | a == entryAddr = pure Nothing
-          | otherwise = Just <$> recoverInnerBlock blk
+    let
+      recoverBlk ::
+        MemSegmentOff 64 ->
+        ParsedBlock X86_64 ids ->
+        FunRecover ids (Maybe (FnBlock X86_64))
+      recoverBlk a blk
+        | a == entryAddr = pure Nothing
+        | otherwise = Just <$> recoverInnerBlock blk
     blks <- Map.traverseMaybeWithKey recoverBlk (fInfo ^. parsedBlocks)
 
     let fn =

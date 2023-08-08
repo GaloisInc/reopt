@@ -98,15 +98,17 @@ ppFunction ::
 ppFunction mcs fn
   | Just tyvs <- Map.lookup (fnName fn) (mcAssignTyVars mcs)
   , Just fty <- Map.lookup (fnAddr fn) (mcFunTypes mcs) =
-      let tyvs' = Map.compose (mcTypeMap mcs) tyvs
-          atp = parens (commas (zipWith ppArg [0 ..] (fttvArgs fty)))
-          rtp = maybe "void" pretty (fttvRet fty)
-       in vcat
-            [ "function " <> nm <> " @ " <> addr <> atp <> " : " <> rtp
-            , lbrace
-            , nest 4 $ vcat (ppBlock tyvs' <$> fnBlocks fn)
-            , rbrace
-            ]
+      let
+        tyvs' = Map.compose (mcTypeMap mcs) tyvs
+        atp = parens (commas (zipWith ppArg [0 ..] (fttvArgs fty)))
+        rtp = maybe "void" pretty (fttvRet fty)
+       in
+        vcat
+          [ "function " <> nm <> " @ " <> addr <> atp <> " : " <> rtp
+          , lbrace
+          , nest 4 $ vcat (ppBlock tyvs' <$> fnBlocks fn)
+          , rbrace
+          ]
  where
   nm = pretty (BSC.unpack (fnName fn))
   addr = pretty (fnAddr fn)

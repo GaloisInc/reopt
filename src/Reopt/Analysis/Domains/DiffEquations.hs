@@ -112,12 +112,14 @@ mapPrepend k v = Map.alter (\o -> Just (v : fromMaybe [] o)) k
 -- | Add a difference equation to constraint set.
 addEq :: Ord v => v -> v -> Integer -> DiffEquations v -> Maybe (DiffEquations v)
 addEq x y c p = do
-  let Diff xr xo = getRep' x 0 p
-      Diff yr yo = getRep' y c p
+  let
+    Diff xr xo = getRep' x 0 p
+    Diff yr yo = getRep' y c p
   if xr /= yr
     then do
-      let x_sz = repSize xr p
-          y_sz = repSize yr p
+      let
+        x_sz = repSize xr p
+        y_sz = repSize yr p
       -- Merge yr into xr
       if x_sz >= y_sz
         then
@@ -168,12 +170,10 @@ ccSet v p = Map.delete v (ccSet' [Diff vr vo] p (Map.singleton vr vo))
 ccSet' :: Ord v => [Diff v] -> DiffEquations v -> Map v Integer -> Map v Integer
 ccSet' [] _ m = m
 ccSet' (Diff _h o : r) p m =
-  let
-    -- l0 = Map.findWithDefault [] h (p^.eqRevMap)
-    -- Add offset o to differences.
-    l = (diffOffset +~ o) <$> l
-   in
-    ccSet' (l ++ r) p (foldl' (\s (Diff v d) -> Map.insert v d s) m l)
+  let -- l0 = Map.findWithDefault [] h (p^.eqRevMap)
+      -- Add offset o to differences.
+      l = (diffOffset +~ o) <$> l
+   in ccSet' (l ++ r) p (foldl' (\s (Diff v d) -> Map.insert v d s) m l)
 
 -- | @join old new@ returns `Nothing` if all the constraints in `old` are
 -- implied by constraints in `new`.  Otherwise, it returns the constraints

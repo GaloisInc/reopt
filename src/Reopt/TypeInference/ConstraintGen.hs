@@ -12,30 +12,10 @@ module Reopt.TypeInference.ConstraintGen (
   showInferredTypes,
 ) where
 
-import Control.Lens (
-  At (at),
-  Getting,
-  Ixed (ix),
-  Lens',
-  makeLenses,
-  non,
-  set,
-  use,
-  view,
-  (<>=),
-  (?=),
-  (^?),
- )
-import Control.Monad (mapAndUnzipM)
-import Control.Monad.Reader (
-  MonadReader (ask),
-  ReaderT (..),
-  asks,
-  join,
-  local,
-  withReaderT,
-  zipWithM_,
- )
+import Control.Lens ((<>=), (?=), (^?))
+import Control.Lens qualified as L
+import Control.Monad (join, mapAndUnzipM, zipWithM_)
+import Control.Monad.Reader qualified as Reader
 import Control.Monad.State.Strict (MonadState, StateT, evalStateT)
 import Control.Monad.Trans (lift)
 import Data.Bits (testBit)
@@ -171,7 +151,7 @@ data CGenGlobalContext arch = CGenGlobalContext
   -- ^ The map from memory segments to their row types.
   }
 
-makeLenses ''CGenGlobalContext
+L.makeLenses ''CGenGlobalContext
 
 -- | Context available when generating constraints for a given module
 data CGenModuleContext arch = CGenModuleContext
@@ -184,7 +164,7 @@ data CGenModuleContext arch = CGenModuleContext
   -- ^ Enclosing global context
   }
 
-makeLenses ''CGenModuleContext
+L.makeLenses ''CGenModuleContext
 
 -- | Context available when generating constraints for a given function
 data CGenFunctionContext arch = CGenFunctionContext
@@ -201,7 +181,7 @@ data CGenFunctionContext arch = CGenFunctionContext
   -- ^ Enclosing module context
   }
 
-makeLenses ''CGenFunctionContext
+L.makeLenses ''CGenFunctionContext
 
 -- | Context available when generating constraints for a given block.  At the
 -- moment, I managed to make it so that we don't need anything special, but it's
@@ -215,7 +195,7 @@ data CGenBlockContext arch = CGenBlockContext
   -- ^ Enclosing function context
   }
 
-makeLenses ''CGenBlockContext
+L.makeLenses ''CGenBlockContext
 
 data CGenState arch = CGenState
   { _assignTyVars :: Map BSC.ByteString (Map FnAssignId TyVar)
@@ -225,11 +205,11 @@ data CGenState arch = CGenState
     _warnings :: [Warning]
   }
 
-makeLenses ''CGenState
+L.makeLenses ''CGenState
 
 newtype CGenM ctx arch a = CGenM
   { _getCGenM ::
-      ReaderT
+      Reader.ReaderT
         (ctx arch)
         (StateT (CGenState arch) SolverM)
         a
@@ -238,7 +218,7 @@ newtype CGenM ctx arch a = CGenM
     ( Functor
     , Applicative
     , Monad
-    , MonadReader (ctx arch)
+    , Reader.MonadReader (ctx arch)
     , MonadState (CGenState arch)
     )
 
@@ -246,7 +226,7 @@ withinContext ::
   (outer arch -> inner arch) ->
   CGenM inner arch a ->
   CGenM outer arch a
-withinContext f (CGenM m) = CGenM (withReaderT f m)
+withinContext f (CGenM m) = CGenM (Reader.withReaderT f m)
 
 inSolverM :: SolverM a -> CGenM ctxt arch a
 inSolverM = CGenM . lift . lift
@@ -266,7 +246,7 @@ runCGenM mem trace orig (CGenM m) = runSolverM trace orig ptrWidth $ do
           { _cgenMemory = mem
           , _cgenMemoryRegions = memRows
           }
-  evalStateT (runReaderT m ctxt0) st0
+  evalStateT (Reader.runReaderT m ctxt0) st0
  where
   ptrWidth = widthVal (memWidth mem)
 
@@ -288,8 +268,8 @@ warn s = CGenM $ warnings <>= [Warning s]
 atFnAssignId ::
   BSC.ByteString ->
   FnAssignId ->
-  Lens' (CGenState arch) (Maybe TyVar)
-atFnAssignId fn aId = assignTyVars . at fn . non Map.empty . at aId
+  L.Lens' (CGenState arch) (Maybe TyVar)
+atFnAssignId fn aId = assignTyVars . L.at fn . L.non Map.empty . L.at aId
 
 -- | Retrieves the type variable associated to the given `FnAssignId`, if any,
 -- otherwise creates and registers a fresh type variable for it.
@@ -303,7 +283,7 @@ tyVarForAssignId ::
   FnAssignId ->
   CGenM ctx arch TyVar
 tyVarForAssignId fn aId = do
-  mtv <- CGenM $ use (atFnAssignId fn aId)
+  mtv <- CGenM $ L.use (atFnAssignId fn aId)
   case mtv of
     Just tv -> pure tv
     Nothing -> do
@@ -323,7 +303,7 @@ tyVarForAssignId fn aId = do
 assignIdTyVar :: BSC.ByteString -> FnAssignId -> CGenM ctx arch TyVar
 assignIdTyVar fn aId = do
   -- fn <- askContext cgenCurrentFunName
-  mTyVar <- CGenM $ use (atFnAssignId fn aId)
+  mTyVar <- CGenM $ L.use (atFnAssignId fn aId)
   case mTyVar of
     Nothing -> tyVarForAssignId fn aId
     Just tyVar -> pure tyVar
@@ -358,12 +338,12 @@ phiType = assignIdType . unFnPhiVar
 argumentType :: Int -> CGenM CGenBlockContext arch Ty
 argumentType i = do
   tys <- fttvArgs <$> askContext (cgenFunctionContext . cgenCurrentFun)
-  case tys ^? ix i of
+  case tys ^? L.ix i of
     Nothing -> error "Missing argument"
     Just ty -> pure (varTy ty)
 
-askContext :: Getting a (ctx arch) a -> CGenM ctx arch a
-askContext = CGenM . ask . view
+askContext :: L.Getting a (ctx arch) a -> CGenM ctx arch a
+askContext = CGenM . Reader.ask . L.view
 
 addrWidth :: CGenM CGenBlockContext arch (NatRepr (ArchAddrWidth arch))
 addrWidth =
@@ -412,9 +392,9 @@ functionTypeTyVars ::
   CGenM CGenBlockContext arch (Maybe FunctionTypeTyVars)
 functionTypeTyVars saddr = do
   moduleContext <- askContext (cgenFunctionContext . cgenModuleContext)
-  let ftypes = view cgenFunTypes moduleContext
-  let namedftypes = view cgenNamedFunTypes moduleContext
-  let mem = view (cgenGlobalContext . cgenMemory) moduleContext
+  let ftypes = L.view cgenFunTypes moduleContext
+  let namedftypes = L.view cgenNamedFunTypes moduleContext
+  let mem = L.view (cgenGlobalContext . cgenMemory) moduleContext
   let aWidth = memAddrWidth mem
 
   case saddr of
@@ -549,7 +529,7 @@ genApp ::
   App (FnValue arch) tp ->
   CGenM CGenBlockContext arch ()
 genApp (ty, outSize) app = do
-  prov <- asks $ view cgenConstraintProv
+  prov <- Reader.asks $ L.view cgenConstraintProv
   case app of
     Eq l r -> do
       join (emitEq prov <$> genFnValue l <*> genFnValue r)
@@ -692,7 +672,7 @@ genMemOp ::
   Some TypeRepr ->
   CGenM CGenBlockContext arch ()
 genMemOp ty ptr (Some tp) = do
-  prov <- asks $ view cgenConstraintProv
+  prov <- Reader.asks $ L.view cgenConstraintProv
   ptrWidth <- widthVal <$> addrWidth
   emitPtr prov ty =<< genFnValue ptr
   case tp of
@@ -730,7 +710,7 @@ genFnAssignment ::
   FnArchConstraints arch =>
   FnAssignment arch tp ->
   CGenM CGenBlockContext arch ()
-genFnAssignment a = local (set cgenConstraintProv prov) $ do
+genFnAssignment a = Reader.local (L.set cgenConstraintProv prov) $ do
   fn <- askContext (cgenFunctionContext . cgenCurrentFunName)
   ty <- varTy <$> tyVarForAssignId fn (fnAssignId a)
   case rhs of
@@ -769,7 +749,7 @@ genFnStmt ::
   FnStmt arch ->
   CGenM CGenBlockContext arch ()
 genFnStmt stmt =
-  local (set cgenConstraintProv prov) $
+  Reader.local (L.set cgenConstraintProv prov) $
     case stmt of
       FnComment _ -> pure ()
       FnAssignStmt a -> genFnAssignment a
@@ -972,16 +952,17 @@ genModuleConstraints m mem trace orig = runCGenM mem trace orig $ do
 
   (defAddrs, defSyms) <- mapAndUnzipM doDef (recoveredDefs m)
 
-  let symMap = Map.fromList (defSyms ++ declSyms)
-      addrMap = Map.fromList (defAddrs ++ declAddrs)
+  let
+    symMap = Map.fromList (defSyms ++ declSyms)
+    addrMap = Map.fromList (defAddrs ++ declAddrs)
 
   withinContext
     (CGenModuleContext addrMap symMap)
     (mapM_ genFunction (recoveredDefs m))
 
   -- FIXME: abstract
-  tyVars <- CGenM $ use assignTyVars
-  warns <- CGenM $ use warnings
+  tyVars <- CGenM $ L.use assignTyVars
+  warns <- CGenM $ L.use warnings
 
   tyMap <- inSolverM unifyConstraints
 

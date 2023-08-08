@@ -1,3 +1,10 @@
+comma-style: leading
+function-arrows: trailing
 haddock-style: single-line
+import-export-style: diff-friendly
 indentation: 2
+in-style: right-align
+let-style: mixed
+record-brace-space: false
+single-constraint-parens: never
 unicode: never
