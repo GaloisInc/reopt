@@ -164,6 +164,7 @@ data PartitionedSegments = PartitionedSegments
   , residualSegments :: [Segment]
   -- ^ Those segments that are not
   }
+  deriving (Show)
 
 computeResidualSegments ::
   DiscoveryState X86_64 ->
@@ -296,8 +297,8 @@ splitAtAddresses addrs segs =
   , final_seg <- splitSegmentAtAddresses addrs initial_seg
   ]
 
--- >>> splitAtAddresses [2, 5, 7] [(1, 5), (6, 7)]
--- [(1,1),(2,4),(5,5),(6,6),(7,7)]
+-- >>> splitAtAddresses [2, 5, 7] (map InclusiveRange [(1, 5), (6, 7)])
+-- [0x1 - 0x1,0x2 - 0x4,0x5 - 0x5,0x6 - 0x6,0x7 - 0x7]
 
 -- NOTE: assumes a sorted residual segment list
 registerAsBlockSegment :: PartitionedSegments -> InclusiveRange Word64 -> PartitionedSegments
