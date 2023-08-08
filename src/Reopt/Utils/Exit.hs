@@ -11,6 +11,7 @@ where
 
 import Control.Exception (catch)
 import Control.Monad.Except (ExceptT, runExceptT)
+import Data.Bifunctor (Bifunctor (first))
 import Data.ByteString qualified as BS
 import Data.Macaw.Utils.IncComp (
   IncCompM,
@@ -22,12 +23,7 @@ import System.IO (hPrint, hPutStrLn, stderr)
 import System.IO.Error (ioeGetErrorType, isDoesNotExistError)
 
 handleEitherWithExit :: Show e => Either e a -> IO a
-handleEitherWithExit r = do
-  case r of
-    Left e -> do
-      hPrint stderr e
-      exitFailure
-    Right b -> pure b
+handleEitherWithExit = handleEitherStringWithExit . first show
 
 handleEitherStringWithExit :: Either String a -> IO a
 handleEitherStringWithExit r = do
