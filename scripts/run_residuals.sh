@@ -5,7 +5,8 @@ set -euv
 cabal build reopt:exe:reopt-explore
 
 cabal run -v0 reopt:exe:reopt-explore -- \
-    --debug-dir ./deps/reopt-benchmark-binaries/centos7-dev/lib64 \
+    --debug-dir ./deps/reopt-benchmark-binaries/centos7-dev/debug-lib64 \
     residuals \
+    --output-for-spreadsheet \
     --header ./scratch/shed.h \
     ${*} 2>&1 | less -R
