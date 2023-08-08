@@ -52,7 +52,7 @@ jobs:
     - name: Cache cabal files
       uses: actions/cache@v3
       with:
-        path: ${{env.home}}/.cabal/store/ghc-${{ env.ghc }}
+        path: ${{env.home}}/.local/state/cabal/store/ghc-${{ env.ghc }}
         # Prefer previous ref
         key: build-cabal-${{ env.ghc }}-${{ github.ref }}
         # otherwise just use most recent build.
@@ -94,9 +94,9 @@ jobs:
     - name: Create archive
       run: |
         mkdir -p dist/reopt/bin
-        cp $HOME/.cabal/bin/reopt         dist/reopt/bin
-        cp $HOME/.cabal/bin/reopt-explore dist/reopt/bin
-        cp $HOME/.cabal/bin/reopt-relink  dist/reopt/bin
+        cp $HOME/.local/bin/reopt         dist/reopt/bin
+        cp $HOME/.local/bin/reopt-explore dist/reopt/bin
+        cp $HOME/.local/bin/reopt-relink  dist/reopt/bin
         cd dist
         tar cvfz reopt.tgz reopt
     - name: Make reopt
