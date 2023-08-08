@@ -300,12 +300,24 @@ splitAtAddresses addrs segs =
 -- >>> splitAtAddresses [2, 5, 7] (map InclusiveRange [(1, 5), (6, 7)])
 -- [0x1 - 0x1,0x2 - 0x4,0x5 - 0x5,0x6 - 0x6,0x7 - 0x7]
 
--- NOTE: assumes a sorted residual segment list
+-- | @registerAsBlockSegment p b@ registers block segment `s` as part of
+-- partition `p`, tracking the remaining residual blocks.
+--
+-- Assumption 1: the residual segment list is sorted.
+--
+-- Assumption 2: the new block does not overlap with previously-registered
+-- blocks.
 registerAsBlockSegment :: PartitionedSegments -> InclusiveRange Word64 -> PartitionedSegments
-registerAsBlockSegment part@(residualSegments -> map getInclusiveRange -> sl) (getInclusiveRange -> (l, u)) =
-  part{residualSegments = map InclusiveRange $ ls ++ splitSegs us}
+registerAsBlockSegment part block@(getInclusiveRange -> (l, u)) =
+  let
+    sl = map getInclusiveRange (residualSegments part)
+    (ls, us) = span (\(_, u') -> u' < l) sl
+   in
+    PartitionedSegments
+      { blockSegments = block : blockSegments part
+      , residualSegments = map InclusiveRange $ ls ++ splitSegs us
+      }
  where
-  (ls, us) = span (\(_, u') -> u' < l) sl
   splitSegs [] = []
   -- l <= u', we have the following cases, assume R is the
   -- region to delete and C is the current region
@@ -320,6 +332,9 @@ registerAsBlockSegment part@(residualSegments -> map getInclusiveRange -> sl) (g
     | u' <= u = (l', l - 1) : splitSegs rest
     -- l > l', u' > u
     | otherwise = (l', l - 1) : (u + 1, u') : rest
+
+-- >>> registerAsBlockSegment (PartitionedSegments [] [InclusiveRange (0, 10)]) (InclusiveRange (3, 5))
+-- PartitionedSegments {blockSegments = [0x3 - 0x5], residualSegments = [0x0 - 0x2,0x6 - 0xa]}
 
 chunkBytes :: MemChunk 64 -> Maybe BSC.ByteString
 chunkBytes = \case
