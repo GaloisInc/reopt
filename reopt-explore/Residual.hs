@@ -164,6 +164,7 @@ data PartitionedSegments = PartitionedSegments
   , residualSegments :: [Segment]
   -- ^ Those segments that are not
   }
+  deriving (Show)
 
 computeResidualSegments ::
   DiscoveryState X86_64 ->
