@@ -48,23 +48,20 @@ jobs:
     - name: Set env.home and env.ghc
       run: |
         echo "home=$HOME" >> $GITHUB_ENV
-        echo "ghc=`ghc --version --help | cut -d' ' -f8`" >> $GITHUB_ENV
-    - name: Cache cabal files
-      uses: actions/cache@v3
+        echo "ghc=`ghc --numeric-version`" >> $GITHUB_ENV
+    - name: Restore cabal cache and dist-newstyle
+      uses: actions/cache/restore@v3
+      id: haskell-cache
       with:
-        path: ${{env.home}}/.local/state/cabal/store/ghc-${{ env.ghc }}
-        # Prefer previous ref
-        key: build-cabal-${{ env.ghc }}-${{ github.ref }}
-        # otherwise just use most recent build.
-        restore-keys: build-cabal-${{ env.ghc }}
-    - name: Cache local build files
-      uses: actions/cache@v3
-      with:
-        path: dist-newstyle
-        # Prefer previous ref
-        key: build-dist-${{ env.ghc }}-${{ github.ref }}
-        # otherwise just use most recent build.
-        restore-keys: build-dist-${{ env.ghc }}
+        path: |
+          ${{ env.home }}/.local/state/cabal/store/ghc-${{ env.ghc }}
+          dist-newstyle
+        # Per-commit cache
+        key: haskell-cache-${{ env.ghc }}-${{ github.ref }}-${{ github.sha }}
+        # Per-branch and per-commit caches
+        restore-keys: |
+          haskell-cache-${{ env.ghc }}-${{ github.ref }}
+          haskell-cache-${{ env.ghc }}
     - name: Cabal freeze and enable werror.
       run: |
         ln -s cabal.project.freeze.ghc.${{ env.ghc }} cabal.project.freeze
@@ -104,6 +101,15 @@ jobs:
       with:
         name: reopt
         path: dist/reopt.tgz
+    - name: Unconditionally save cabal store
+      uses: actions/cache/save@v3
+      # c.f. https://github.com/actions/cache/issues/1154
+      if: always() && !steps.haskell-cache.outputs.cache-hit
+      with:
+        path: |
+          ${{ env.home }}/.local/state/cabal/store/ghc-${{ env.ghc }}
+          dist-newstyle
+        key: haskell-cache-${{ env.ghc }}-${{ github.ref }}-${{ github.sha }}
 
   # # This builds the VSCode extension
   # vscode-extension:
