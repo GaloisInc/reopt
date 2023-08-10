@@ -2,6 +2,8 @@
 
 typedef void* fd_set; // yikes
 
+typedef void* jmp_buf; // yikes
+
 typedef void* nfds_t; // yikes
 
 typedef void* pcre; // yikes
@@ -10,22 +12,25 @@ typedef void* pcre_extra; // yikes
 typedef void* regex_t; // yikes
 typedef void* regmatch_t; // yikes
 
+typedef char *security_context_t;
 typedef void* sigjmp_buf; // yikes
 typedef void* struct_dirent; // yikes
 typedef void* struct_dirent64; // yikes
 typedef void* struct_epoll_event;
 typedef void* struct_in_addr; // yikes
+typedef void* struct_lconv; // yikes
 typedef void* struct_msghdr; // yikes
 typedef void* struct_pollfd; // yikes
 typedef void* struct_rlimit; // yikes
+typedef void* struct_sigaction; // yikes
 typedef void* struct_sockaddr; // yikes
 typedef void* struct_stat64; // yikes
 typedef void* struct_termios; // yikes
+typedef void* struct_timespec; // yikes
 typedef void* struct_timeval; // yikes
 typedef void* struct_timezone; // yikes
 typedef void* struct_utimbuf; // yikes
 typedef void* struct_ypall_callback; // yikes
-
 typedef void* sockaddr; // yikes
 
 typedef void* va_list; // yikes
@@ -39,13 +44,17 @@ typedef unsigned uint32_t;
 typedef void* DIR; // yikes
 typedef void* FILE; // yikes
 
+typedef void* cap_t; // yikes
+typedef void* cap_value_t; // yikes
 typedef void* char32_t; // yikes
+typedef void* clockid_t; // yikes
 typedef void* mbstate_t; // yikes
 typedef uint_t mode_t;
 typedef long off_t;
 typedef long long off64_t; // ???
 typedef int pid_t;
 typedef void* sighandler_t;
+typedef void* sigset_t;
 typedef unsigned long size_t;
 typedef size_t socklen_t;
 typedef size_t ssize_t;
@@ -64,10 +73,14 @@ closedir
 readdir64
 */
 
+int _setjmp(jmp_buf env);
+
 size_t __ctype_get_mb_cur_max(void);
-int __xstat64(int ver, const char * path, struct_stat64 * stat_buf);
-int __lxstat64(int ver, const char * path, struct_stat64 * stat_buf);
 int __fxstat64(int ver, int fildes, struct_stat64 * stat_buf);
+int __lxstat64(int ver, const char * path, struct_stat64 * stat_buf);
+void * __memcpy_chk(void * dest, const void * src, size_t len, size_t destlen);
+int __sprintf_chk(char * str, int flag, size_t strlen, const char * format);
+int __xstat64(int ver, const char * path, struct_stat64 * stat_buf);
 
 int accept(int sockfd, void *addr, socklen_t *addrlen);
 int atoi(const char *nptr);
@@ -76,9 +89,20 @@ int bind(int sockfd, const void *addr, socklen_t addrlen);
 char *bindtextdomain(const char *domainname, const char *dirname);
 
 void *calloc(size_t num, size_t size);
+cap_t cap_dup(cap_t cap_p);
+int cap_free(void *obj_d);
+int cap_from_name(const char *name, cap_value_t *cap_p);
+cap_t cap_from_text(const char *buf_p);
+cap_t cap_get_file(const char *path_p);
+cap_t cap_init(void);
+char *cap_to_name(cap_value_t cap);
+char *cap_to_text(cap_t caps, ssize_t *length_p);
 int chdir(const char *path);
 int chmod(const char *path, mode_t mode);
 int chown(const char *pathname, uid_t owner, gid_t group);
+int clock_getres(clockid_t clk_id, struct_timespec *res);
+int clock_gettime(clockid_t clk_id, struct_timespec *tp);
+int clock_settime(clockid_t clk_id, const struct_timespec *tp);
 int close(int fd);
 int closedir(DIR *dirp);
 int connect(int sockfd, const sockaddr *addr, socklen_t addrlen);
@@ -112,6 +136,7 @@ int fputc(int c, FILE *stream);
 int fputs(const char *s, FILE *stream);
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
 void free(void *ptr);
+void freecon(security_context_t con);
 int fseek(FILE *fp, long offset, int whence);
 int fseeko(FILE *fp, off_t offset, int whence);
 int fseeko64(FILE *fp, off64_t offset, int whence);
@@ -151,6 +176,7 @@ int kill(pid_t pid, int sig);
 
 int link(const char *oldpath, const char *newpath);
 int listen(int sockfd, int backlog);
+struct_lconv *localeconv(void);
 off_t lseek(int fd, off_t offset, int whence);
 
 void* malloc(size_t numbytes);
@@ -158,6 +184,7 @@ size_t mbrtoc32(char32_t restrict *pc32, const char *restrict s, size_t n, mbsta
 void* memchr(const void *str, int c, size_t n);
 void* memcpy(void *dest, const void *src, size_t n);
 void* memmove(void *dest, const void *src, size_t n);
+void *mempcpy(void *dest, const void *src, size_t n);
 void* memset(void *s, int c, size_t n);
 int mkdir(const char *path, mode_t mode);
 int mkstemp64(char * template);
@@ -202,8 +229,10 @@ int setrlimit(int resource, const struct_rlimit *rlim);
 int settimeofday(const struct_timeval *tv, const struct_timezone *tz);
 int setuid(uid_t uid);
 int setvbuf(FILE *stream, char *buffer, int mode, size_t size);
+int sigaction(int sig, const struct_sigaction *act, struct_sigaction *oact);
 void siglongjmp(sigjmp_buf env, int val);
 sighandler_t signal(int signum, sighandler_t handler);
+int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
 unsigned sleep(unsigned seconds);
 int socket(int domain, int type, int protocol);
 void srand(unsigned int seed);
