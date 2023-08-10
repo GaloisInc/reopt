@@ -391,24 +391,24 @@ printLogEvent event = do
         case s of
           Discovery ->
             unlines $
-              [ printf "  Block 0x%x: %s" (discErrorBlockAddr de) (Text.unpack (discErrorMessage de))
+              [ printf "Block 0x%x: %s" (discErrorBlockAddr de) (Text.unpack (discErrorMessage de))
               | de <- e
               ]
-                ++ ["  Incomplete."]
+                ++ ["Incomplete."]
           InvariantInference ->
             printf
-              "  Block: 0x%x: %s"
+              "Block: 0x%x: %s"
               (segoffWord64 (ruBlock e))
               (ppRegisterUseErrorReason (ruReason e))
           Recovery ->
             printf
-              "  Failed (0x%x:%d, %s): %s"
+              "Failed (0x%x:%d, %s): %s"
               (segoffWord64 (recoverErrorBlock e))
               (recoverErrorInsnIndex e)
               (ppReoptErrorTag (recoverErrorTag e))
               (recoverErrorMessage e)
           AnnotationGeneration ->
-            printf "  %s" e
+            printf "%s" e
     ReoptFunStepLog _st _f msg ->
       logStep msg
     ReoptFunStepAllFinished _ _ ->
