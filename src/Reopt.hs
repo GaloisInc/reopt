@@ -223,6 +223,7 @@ import Data.Vector qualified as V
 import Data.Word (Word16, Word32, Word64)
 import Flexdis86 qualified as F
 import Numeric (showHex)
+import Prettyprinter qualified as PP
 import Reopt.ArgResolver (
   ArgResolver,
   ArgResolverError (UnsupportedArgType, UnsupportedReturnType),
@@ -632,6 +633,7 @@ checkBlockError b = do
 
 -- | Prepend discovery event to list of reopt log evnts.
 logDiscEventAsReoptEvents ::
+  MemWidth (Macaw.ArchAddrWidth arch) =>
   (Events.ReoptLogEvent arch -> IO ()) ->
   Macaw.AddrSymMap (Macaw.ArchAddrWidth arch) ->
   Macaw.DiscoveryEvent arch ->
@@ -656,11 +658,20 @@ logDiscEventAsReoptEvents logger symMap evt = do
               (Events.ppFnEntry (Map.lookup tgt symMap) tgt)
               (Macaw.ppFunReason rsn)
       logger $ Events.ReoptFunStepLog Events.Discovery (mkFunId a) msg
-    Macaw.ReportAnalyzeBlock fa b -> do
-      let msg = printf "Discovered block %s." (Events.ppSegOff b)
+    Macaw.ReportAnalyzeBlock fa b mReason -> do
+      let msg = case mReason of
+            Nothing -> printf "Examining block %s." (Events.ppSegOff b)
+            Just (Macaw.SplitAt o _prior) ->
+              show $
+                "Re-examining block"
+                  PP.<+> PP.pretty (Events.ppSegOff b)
+                  PP.<+> "after it was split at offset"
+                  PP.<+> PP.pretty o PP.<> "."
+            Just reason -> printf "Examining block %s (%s)." (Events.ppSegOff b) (show (PP.pretty reason))
       logger $ Events.ReoptFunStepLog Events.Discovery (mkFunId fa) msg
 
 reoptRunDiscovery ::
+  MemWidth (Macaw.ArchAddrWidth arch) =>
   Macaw.AddrSymMap (Macaw.ArchAddrWidth arch) ->
   IncCompM (Macaw.DiscoveryEvent arch) a a ->
   ReoptM arch r a
