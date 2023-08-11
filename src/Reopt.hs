@@ -152,6 +152,7 @@ import Data.Macaw.Analysis.RegisterUse (
   ppRegisterUseErrorReason,
  )
 import Data.Macaw.CFG (
+  ArchConstraints,
   ArchFn,
   ArchReg,
   ArchSegmentOff,
@@ -218,7 +219,6 @@ import Data.Parameterized.Some (Some (..))
 import Data.Parameterized.TraversableF (FoldableF)
 import Data.Set qualified as Set
 import Data.String (IsString (..))
-import Data.Text qualified as T
 import Data.Vector qualified as V
 import Data.Word (Word16, Word32, Word64)
 import Flexdis86 qualified as F
@@ -596,7 +596,10 @@ reoptRunInit m =
           Left e -> pure (Left (Events.ReoptInitError e))
           Right v -> c v
 
-checkBlockError :: Macaw.ParsedBlock arch ids -> Maybe Events.DiscoveryError
+checkBlockError ::
+  ArchConstraints arch =>
+  Macaw.ParsedBlock arch ids ->
+  Maybe Events.DiscoveryError
 checkBlockError b = do
   let a = memWordValue $ addrOffset $ segoffAddr $ Macaw.pblockAddr b
   case Macaw.pblockTermStmt b of
@@ -616,7 +619,7 @@ checkBlockError b = do
           , Events.discErrorBlockAddr = a
           , Events.discErrorBlockSize = Macaw.blockSize b
           , Events.discErrorBlockInsnIndex = length (Macaw.pblockStmts b)
-          , Events.discErrorMessage = msg
+          , Events.discErrorMessage = PP.pretty msg
           }
     Macaw.ClassifyFailure _ reasons ->
       Just $!
@@ -626,13 +629,22 @@ checkBlockError b = do
           , Events.discErrorBlockSize = Macaw.blockSize b
           , Events.discErrorBlockInsnIndex = length (Macaw.pblockStmts b)
           , Events.discErrorMessage =
-              "Unclassified control flow transfer.\n"
-                <> T.intercalate "\n" (map (T.pack . ("→ " <>)) reasons)
+              PP.vcat
+                [ "Unclassified control flow transfer"
+                , PP.indent 2 $
+                    PP.vcat
+                      [ "Block statements:"
+                      , PP.indent 2 $ PP.vcat $ map PP.viaShow (Macaw.pblockStmts b)
+                      , "Classifier failures:"
+                      , PP.indent 2 $ PP.vcat $ map PP.viaShow reasons
+                      ]
+                ]
           }
     _ -> Nothing
 
 -- | Prepend discovery event to list of reopt log evnts.
 logDiscEventAsReoptEvents ::
+  ArchConstraints arch =>
   MemWidth (Macaw.ArchAddrWidth arch) =>
   (Events.ReoptLogEvent arch -> IO ()) ->
   Macaw.AddrSymMap (Macaw.ArchAddrWidth arch) ->
@@ -671,6 +683,7 @@ logDiscEventAsReoptEvents logger symMap evt = do
       logger $ Events.ReoptFunStepLog Events.Discovery (mkFunId fa) msg
 
 reoptRunDiscovery ::
+  ArchConstraints arch =>
   MemWidth (Macaw.ArchAddrWidth arch) =>
   Macaw.AddrSymMap (Macaw.ArchAddrWidth arch) ->
   IncCompM (Macaw.DiscoveryEvent arch) a a ->
@@ -1758,6 +1771,7 @@ headerTypeMap hdrAnn dynDepsTypeMap symAddrMap noretMap = do
 
 doDiscovery ::
   forall arch r.
+  ArchConstraints arch =>
   -- | Header with hints for assisting typing.
   AnnDeclarations ->
   Elf.ElfHeaderInfo (Macaw.ArchAddrWidth arch) ->

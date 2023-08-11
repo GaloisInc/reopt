@@ -22,8 +22,8 @@ import Data.Vector qualified as V
 import Data.ByteString qualified as BS
 
 import Data.Macaw.Architecture.Info (ArchitectureInfo (..))
+import Data.Macaw.CFG qualified as Macaw
 import Data.Macaw.Utils.IncComp ( incCompLog, IncCompM)
-import Data.Macaw.Discovery qualified as Macaw
 import Reopt.PLTParser as Reopt (
   PLTInfo (..),
   extractPLTEntries,
@@ -46,6 +46,7 @@ type ProcessPLTEntries w =
 
 data SomeArchitectureInfo w where
   SomeArch ::
+    Macaw.ArchConstraints arch =>
     !(ArchitectureInfo arch) ->
     !(ProcessPLTEntries (Macaw.ArchAddrWidth arch)) ->
     SomeArchitectureInfo (Macaw.ArchAddrWidth arch)

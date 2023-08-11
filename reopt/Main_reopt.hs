@@ -57,7 +57,6 @@ import Paths_reopt (version)
 import Prettyprinter qualified as PP
 import Prettyprinter.Render.Text qualified as PP
 import Reopt
-import Reopt.CFG.FnRep.X86 ()
 import Reopt.ELFArchInfo (getElfArchInfo)
 import Reopt.EncodeInvariants (
   encodeInvariantFailedMsg,
@@ -728,8 +727,9 @@ showConstraints args elfPath = do
   mr <- runReoptM printLogEvent $ do
     hdrAnn <- resolveHeader (headerPath args) (clangPath args)
 
-    let funPrefix :: BSC.ByteString
-        funPrefix = unnamedFunPrefix args
+    let
+      funPrefix :: BSC.ByteString
+      funPrefix = unnamedFunPrefix args
 
     (os, initState) <- reoptX86Init (loadOptions args) rOpts origElf
     let symAddrMap = initDiscSymAddrMap initState
@@ -836,8 +836,9 @@ performReopt args elfPath = do
   mr <- runReoptM logger2 $ do
     hdrAnn <- resolveHeader (headerPath args) (clangPath args)
 
-    let funPrefix :: BSC.ByteString
-        funPrefix = unnamedFunPrefix args
+    let
+      funPrefix :: BSC.ByteString
+      funPrefix = unnamedFunPrefix args
 
     (os, initState) <- reoptX86Init (loadOptions args) rOpts origElf
     let symAddrMap = initDiscSymAddrMap initState
@@ -890,12 +891,13 @@ performReopt args elfPath = do
             (traceConstraintOrigins args)
 
     -- FIXME: move
-    let prettyDefs =
-          [ PP.pretty n PP.<+> "=" PP.<+> PP.pretty ty
-          | (n, ty) <- mcNamedTypes moduleConstraints
-          ]
-        prettyWarnings =
-          ["# Warning: " <> PP.viaShow w | w <- mcWarnings moduleConstraints]
+    let
+      prettyDefs =
+        [ PP.pretty n PP.<+> "=" PP.<+> PP.pretty ty
+        | (n, ty) <- mcNamedTypes moduleConstraints
+        ]
+      prettyWarnings =
+        ["# Warning: " <> PP.viaShow w | w <- mcWarnings moduleConstraints]
 
     case typedFnsExportPath args of
       Nothing -> pure ()
@@ -933,16 +935,17 @@ performReopt args elfPath = do
                 Right _ -> do
                   funStepFinished AnnotationGeneration fid ()
 
-            let vcgAnn :: Ann.ModuleAnnotations
-                vcgAnn =
-                  Ann.ModuleAnnotations
-                    { Ann.llvmFilePath = llvmPath
-                    , Ann.binFilePath = elfPath
-                    , Ann.pageSize = 4096
-                    , Ann.stackGuardPageCount = 1
-                    , Ann.functions = rights (snd <$> ann)
-                    , Ann.extFunctions = ext
-                    }
+            let
+              vcgAnn :: Ann.ModuleAnnotations
+              vcgAnn =
+                Ann.ModuleAnnotations
+                  { Ann.llvmFilePath = llvmPath
+                  , Ann.binFilePath = elfPath
+                  , Ann.pageSize = 4096
+                  , Ann.stackGuardPageCount = 1
+                  , Ann.functions = rights (snd <$> ann)
+                  , Ann.extFunctions = ext
+                  }
             reoptWriteByteString AnnotationsFileType annPath (Aeson.encode vcgAnn)
             funStepAllFinished AnnotationGeneration ()
 

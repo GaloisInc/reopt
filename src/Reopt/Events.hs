@@ -69,21 +69,10 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Parameterized.Some (Some (..))
 import Data.Text (Text)
-import Data.Text qualified as Text
 import Data.Void (Void)
 import Data.Word (Word64)
 import Numeric (showHex)
-import Prettyprinter (
-  Doc,
-  defaultLayoutOptions,
-  hang,
-  hsep,
-  indent,
-  layoutPretty,
-  pretty,
-  viaShow,
-  vsep,
- )
+import Prettyprinter qualified as PP
 import Prettyprinter.Render.String (renderString)
 import Reopt.ExternalTools qualified as Ext
 import Reopt.FunUseMap (mkFunUseMap, totalFunUseSize)
@@ -160,7 +149,7 @@ data DiscoveryError = DiscoveryError
   , discErrorBlockSize :: !Int
   , discErrorBlockInsnIndex :: !Int
   -- ^ Instruction index.
-  , discErrorMessage :: !Text
+  , discErrorMessage :: !(PP.Doc ())
   }
 
 -------------------------------------------------------------------------------
@@ -391,7 +380,7 @@ printLogEvent event = do
         case s of
           Discovery ->
             unlines $
-              [ printf "  Block 0x%x: %s" (discErrorBlockAddr de) (Text.unpack (discErrorMessage de))
+              [ printf "  Block 0x%x: %s" (discErrorBlockAddr de) (show (discErrorMessage de))
               | de <- e
               ]
                 ++ ["  Incomplete."]
@@ -514,28 +503,28 @@ incStepError stepTag failureTag = Map.alter logFail stepTag
   logFail (Just m) = Just $ Map.alter incErr failureTag m -- otherwise just increment the particular failure
 
 -- | Render the registered failures in an indented list-style Doc.
-renderAllFailures' :: forall a. (Num a, Show a) => StepErrorMap a -> Doc ()
-renderAllFailures' = vsep . map renderStepFailures . Map.toList
+renderAllFailures' :: forall a. (Num a, Show a) => StepErrorMap a -> PP.Doc ()
+renderAllFailures' = PP.vsep . map renderStepFailures . Map.toList
  where
-  renderStepFailures :: (ReoptStepTag, Map ReoptErrorTag a) -> Doc ()
+  renderStepFailures :: (ReoptStepTag, Map ReoptErrorTag a) -> PP.Doc ()
   renderStepFailures (tag, failures) =
     let hdr =
-          hsep
-            [ viaShow $ stepCount failures
-            , pretty "failures during"
-            , pretty (ppReoptStepTag tag) <> pretty " step:"
+          PP.hsep
+            [ PP.viaShow $ stepCount failures
+            , PP.pretty "failures during"
+            , PP.pretty (ppReoptStepTag tag) <> PP.pretty " step:"
             ]
-     in hang 2 $ vsep $ hdr : map renderFailure (Map.toList failures)
-  renderFailure :: (ReoptErrorTag, a) -> Doc ()
-  renderFailure (tag, cnt) = hsep [pretty $ show cnt, pretty $ ppReoptErrorTag tag]
+     in PP.hang 2 $ PP.vsep $ hdr : map renderFailure (Map.toList failures)
+  renderFailure :: (ReoptErrorTag, a) -> PP.Doc ()
+  renderFailure (tag, cnt) = PP.hsep [PP.pretty $ show cnt, PP.pretty $ ppReoptErrorTag tag]
   stepCount :: Map ReoptErrorTag a -> a
   stepCount = foldl' (+) 0 . Map.elems
 
 renderAllFailures :: (Num a, Show a) => StepErrorMap a -> String
 renderAllFailures failures =
   renderString $
-    layoutPretty defaultLayoutOptions $
-      indent 2 $
+    PP.layoutPretty PP.defaultLayoutOptions $
+      PP.indent 2 $
         renderAllFailures' failures
 
 -----------------------------------------------------------------------
