@@ -10,6 +10,8 @@ import Data.ByteString.Lazy qualified as BSL
 import Data.Text (Text)
 import Data.Word (Word64)
 import GHC.Generics (Generic)
+import Prettyprinter qualified as PP
+import Prettyprinter.Render.Text qualified as PP
 import Reopt.Events (
   DiscoveryError (
     discErrorBlockAddr,
@@ -75,7 +77,10 @@ exportEvent h evt =
             let insn = discErrorBlockInsnIndex e
             let sz = discErrorBlockSize e
             let msg = discErrorMessage e
-            emitEvent h $ CFGError f b sz insn msg
+            emitEvent h $
+              CFGError f b sz insn $
+                PP.renderStrict $
+                  PP.layoutPretty PP.defaultLayoutOptions msg
         InvariantInference -> do
           pure ()
         AnnotationGeneration -> do

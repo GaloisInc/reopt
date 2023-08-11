@@ -57,7 +57,6 @@ import Paths_reopt (version)
 import Prettyprinter qualified as PP
 import Prettyprinter.Render.Text qualified as PP
 import Reopt
-import Reopt.CFG.FnRep.X86 ()
 import Reopt.ELFArchInfo (getElfArchInfo)
 import Reopt.EncodeInvariants (
   encodeInvariantFailedMsg,
