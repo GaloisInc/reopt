@@ -1,9 +1,10 @@
+{-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Reopt.TypeInference.Solver.UnionFindMap where
 
 import Control.Lens (at, (%%~), (%~), (?~))
-import Data.Generics.Product (field)
+import Data.Generics.Labels ()
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import GHC.Generics (Generic)
@@ -28,7 +29,7 @@ empty :: UFMKeyInfo k ki => UnionFindMap k ki v
 empty = UnionFindMap mempty mempty
 
 lookupRep :: UFMKeyInfo k ki => k -> UnionFindMap k ki v -> (ki, UnionFindMap k ki v)
-lookupRep k0 = field @"ufmEqv" %%~ go k0
+lookupRep k0 = #ufmEqv %%~ go k0
  where
   go k m =
     case Map.lookup k m of
@@ -47,18 +48,18 @@ lookup k m = ((ki', Map.lookup (projectKey ki') (ufmDefs m)), m')
   (ki', m') = lookupRep k m
 
 insert :: UFMKeyInfo k ki => k -> v -> UnionFindMap k ki v -> UnionFindMap k ki v
-insert k v = field @"ufmDefs" . at k ?~ v
+insert k v = #ufmDefs . at k ?~ v
 
 -- | @delete k m@ forgets any definition for @k@, without touching any
 -- equivalences.
 delete :: UFMKeyInfo k ki => k -> UnionFindMap k ki v -> UnionFindMap k ki v
-delete k = field @"ufmDefs" %~ Map.delete k
+delete k = #ufmDefs %~ Map.delete k
 
 -- | @unify root leaf@ will make @root@ the new equiv. rep
 -- for @leaf@.  Note that both root and leaf should be the reps. of
 -- their corresponding equivalence classes, and that only @root@ is allowed a definition.
 unify :: UFMKeyInfo k ki => ki -> k -> UnionFindMap k ki v -> UnionFindMap k ki v
-unify root leaf = field @"ufmEqv" %~ Map.insert leaf root
+unify root leaf = #ufmEqv %~ Map.insert leaf root
 
 -- | Map the representative element onto the class.
 eqvClasses :: UFMKeyInfo k ki => UnionFindMap k ki v -> Map k [ki]
