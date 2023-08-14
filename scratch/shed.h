@@ -20,6 +20,7 @@ typedef void* struct_pollfd; // yikes
 typedef void* struct_rlimit; // yikes
 typedef void* struct_sockaddr; // yikes
 typedef void* struct_stat64; // yikes
+typedef void* struct_statx; // yikes
 typedef void* struct_termios; // yikes
 typedef void* struct_timeval; // yikes
 typedef void* struct_timezone; // yikes
@@ -64,11 +65,12 @@ closedir
 readdir64
 */
 
-size_t __ctype_get_mb_cur_max(void);
+size_t __ctype_get_mb_cur_max();
 int __xstat64(int ver, const char * path, struct_stat64 * stat_buf);
 int __lxstat64(int ver, const char * path, struct_stat64 * stat_buf);
 int __fxstat64(int ver, int fildes, struct_stat64 * stat_buf);
 
+void abort();
 int accept(int sockfd, void *addr, socklen_t *addrlen);
 int atoi(const char *nptr);
 
@@ -110,6 +112,7 @@ FILE *fopen64(const char *filename, const char *mode);
 pid_t fork();
 int fputc(int c, FILE *stream);
 int fputs(const char *s, FILE *stream);
+int fputs_unlocked(const char *s, FILE *stream);
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
 void free(void *ptr);
 int fseek(FILE *fp, long offset, int whence);
@@ -207,6 +210,9 @@ sighandler_t signal(int signum, sighandler_t handler);
 unsigned sleep(unsigned seconds);
 int socket(int domain, int type, int protocol);
 void srand(unsigned int seed);
+int statx(
+    int dirfd, const char *pathname, int flags,
+    unsigned int mask, struct_statx *statxbuf);
 int strcasecmp(const char *s1, const char *s2);
 char *strdup(const char *s);
 int strncasecmp(const char *s1, const char *s2, size_t n);
