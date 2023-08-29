@@ -440,7 +440,9 @@ reoptDefaultDiscoveryOptions =
 -- | Information from user to control which addresses to include and
 -- exclude.
 data ReoptOptions = ReoptOptions
-  { roIncluded :: [String]
+  { roExtraEntryPoints :: [String]
+  -- ^ Additional entry points we want Reopt to consider
+  , roIncluded :: [String]
   -- ^ Symbols/addresses user wanted included
   , roExcluded :: [String]
   -- ^ Symbols/addresses user wanted exluded.
@@ -462,7 +464,8 @@ data ReoptOptions = ReoptOptions
 defaultReoptOptions :: ReoptOptions
 defaultReoptOptions =
   ReoptOptions
-    { roIncluded = []
+    { roExtraEntryPoints = []
+    , roIncluded = []
     , roExcluded = []
     , roVerboseMode = False
     , roDiscoveryOptions = reoptDefaultDiscoveryOptions
@@ -970,7 +973,7 @@ initDiscState mem initPoints regInfo symAddrMap explorePred ainfo reoptOpts = do
   let resolveEntry qsn
         | ".cold" `BS.isSuffixOf` qsnBytes qsn = Nothing
         | otherwise = Just Macaw.MayReturnFun
-  let entryPoints0 =
+  let noReturnEntryPoints =
         Map.mapMaybe resolveEntry (samAddrMap symAddrMap)
           & addKnownFn symAddrMap "abort" Macaw.NoReturnFun
           & addKnownFn symAddrMap "exit" Macaw.NoReturnFun
@@ -980,7 +983,9 @@ initDiscState mem initPoints regInfo symAddrMap explorePred ainfo reoptOpts = do
           & addKnownFn symAddrMap "__malloc_assert" Macaw.NoReturnFun
           & addKnownFn symAddrMap "__stack_chk_fail" Macaw.NoReturnFun
           & addKnownFn symAddrMap "_ZSt9terminatev" Macaw.NoReturnFun
-  let entryPoints = foldl (\m a -> Map.insert a Macaw.MayReturnFun m) entryPoints0 initPoints
+  extraEntryPoints <- mapM (resolveSymAddr mem regInfo symAddrMap) (roExtraEntryPoints reoptOpts)
+  let mayReturnEntryPoints = initPoints ++ extraEntryPoints
+  let entryPoints = foldl (\m a -> Map.insert a Macaw.MayReturnFun m) noReturnEntryPoints mayReturnEntryPoints
   case (roIncluded reoptOpts, roExcluded reoptOpts) of
     ([], excludeNames) -> do
       excludeAddrs <- mapM (resolveSymAddr mem regInfo symAddrMap) excludeNames
@@ -997,6 +1002,9 @@ initDiscState mem initPoints regInfo symAddrMap explorePred ainfo reoptOpts = do
       let initState =
             Macaw.emptyDiscoveryState mem (getAddrSymMap symAddrMap) ainfo
               & Macaw.trustedFunctionEntryPoints .~ entryPoints
+              -- NOTE (val) It looks a bit weird that we're not also checking
+              -- `explorePred a` here.  Not sure that's intended, and it's
+              -- definitely not documented.
               & Macaw.exploreFnPred .~ (`Set.member` s)
               & Macaw.markAddrsAsFunction Macaw.InitAddr s
       pure $! initState
