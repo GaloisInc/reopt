@@ -2090,22 +2090,24 @@ resolveArgType nm tp0 =
     TypedefAnnType _ tp ->
       resolveArgType nm tp
 
--- | This parses the types extracted from header function argumnts to
--- the machine code registers that the function will expect.
+-- | This parses the types extracted from header function arguments to the
+-- machine code registers that the function will expect.
 argsToRegisters ::
+  forall m.
   Monad m =>
-  -- | Number of arguments processed so far.
-  Int ->
-  -- | Remaining arguments to parse
+  -- | Vector of arguments to a given function
   V.Vector AnnFunArg ->
   ArgResolver m ()
-argsToRegisters cnt args
-  | cnt >= V.length args = pure ()
-  | otherwise = do
-      let arg = args V.! cnt
-      let nm = fromMaybe ("arg" ++ show cnt) (funArgName arg)
-      resolveArgType nm (funArgType arg)
-      argsToRegisters (cnt + 1) args
+argsToRegisters args = go 0
+  where
+    go :: Int -> ArgResolver m ()
+    go argIx
+      | argIx >= V.length args = pure ()
+      | otherwise = do
+          let arg = args V.! argIx
+          let nm = fromMaybe ("arg" ++ show argIx) (funArgName arg)
+          resolveArgType nm (funArgType arg)
+          go (argIx + 1)
 
 parseReturnType :: AnnType -> Either ArgResolverError [Some X86RetInfo]
 parseReturnType tp0 =
@@ -2124,7 +2126,7 @@ resolveAnnFunType ::
   AnnFunType ->
   ExceptT ArgResolverError m X86FunTypeInfo
 resolveAnnFunType funType = do
-  args <- runArgResolver (argsToRegisters 0 (funArgs funType))
+  args <- runArgResolver (argsToRegisters (funArgs funType))
   ret <-
     case parseReturnType (funRet funType) of
       Left e -> throwError e
