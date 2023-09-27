@@ -151,7 +151,7 @@ performRecovery residualOpts reoptOpts (_idx, fPath) = do
       >>= either (error . show) return
   hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
   logger <- createLogger reoptOpts fPath
-  (_os, ds, recovOut, _) <-
+  (_os, ds, recovOut, _, _) <-
     handleEitherWithExit
       =<< runReoptM
         logger

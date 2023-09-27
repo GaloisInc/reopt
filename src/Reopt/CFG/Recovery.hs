@@ -89,7 +89,6 @@ import Data.Macaw.Discovery.State
 import Data.Macaw.Memory.Permissions qualified as Perm
 import Data.Macaw.Types hiding (Type)
 import Data.Macaw.Types qualified as M (Type)
-
 import Data.Macaw.X86 (
   x86DemandContext,
   x86_64CallParams,
@@ -547,7 +546,8 @@ recoverCValue cv = do
     RelocatableCValue _w addr
       | Just addrRef <- asSegmentOff mem addr
       , Perm.isExecutable (segmentFlags (segoffSegment addrRef)) -> do
-          throwErrorAt ReoptUnsupportedFnValueTag "Cannot lift code pointers."
+        pure $ FnCodePointer addr
+          -- throwErrorAt ReoptUnsupportedFnValueTag "Cannot lift code pointers."
       | otherwise ->
           case asAbsoluteAddr addr of
             Just absAddr -> emitNewAssign (toInteger absAddr)
@@ -928,6 +928,7 @@ recoverStmt ::
   Stmt X86_64 ids ->
   Recover ids ()
 recoverStmt stmtIdx stmt = do
+  -- trace ("Recovering " <> show (ppStmt pretty stmt)) (pure ())
   case stmt of
     AssignStmt asgn -> do
       recoverAssign stmtIdx asgn
@@ -955,11 +956,12 @@ recoverStmt stmtIdx stmt = do
     Comment msg -> do
       addFnStmt $ FnComment msg
     ExecArchStmt astmt0 -> do
-      -- Architecture-specific statements are assumed to always
-      -- have side effects.
+      -- Architecture-specific statements are assumed to always have side
+      -- effects.
       astmt <- traverseF recoverValue astmt0
       addFnStmt (FnArchStmt (X86FnStmt astmt))
-    InstructionStart o _ -> do
+    InstructionStart o asm -> do
+      addFnStmt $ FnComment asm -- added by val
       -- Set recovery instruction offset
       modify $ \s -> s{rsBlockOff = o}
     ArchState _ _ -> do
@@ -1868,8 +1870,7 @@ x86CallRegs mem funNameMap funTypeMap _callSite regs = do
             Left $ Reason CallTargetNotFunctionEntryPoint (memWordValue (addrOffset faddr))
       SymbolValue _ (SymbolRelocation nm _ver) -> do
         pure nm
-      _ ->
-        Left $ Reason IndirectCallTarget ()
+      _ -> Left $ Reason IndirectCallTarget ()
   case funTypeMap nm of
     Just tp -> x86TranslateCallType mem nm regs tp
     Nothing -> Left $ Reason UnknownCallTargetArguments nm
@@ -1969,7 +1970,6 @@ recoverFunction sysp mem fInfo invMap nm curArgs curRets = do
           }
   runFunRecover funCtx $ do
     let entryBlk = fromJust $ Map.lookup entryAddr (fInfo ^. parsedBlocks)
-
     -- Insert uninitialized register into initial block location map.
     let
       insUninit ::

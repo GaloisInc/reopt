@@ -11,6 +11,7 @@ module Reopt.TypeInference.HeaderTypes (
 ) where
 
 import Data.ByteString.Char8 qualified as BSC
+import Data.List (intercalate)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Vector qualified as V
@@ -33,6 +34,7 @@ data AnnType
     PtrAnnType !AnnType
   | -- | A typedef with the name and resolved right hand side.
     TypedefAnnType !BSC.ByteString !AnnType
+  | FunPtrAnnType !AnnType ![AnnType]
   deriving (Eq, Show, Read)
 
 -- | Pretty print the header type for the end user.
@@ -44,6 +46,7 @@ ppAnnType = \case
   DoubleAnnType -> "double"
   PtrAnnType tp -> ppAnnType tp ++ "*"
   TypedefAnnType nm _ -> BSC.unpack nm
+  FunPtrAnnType ret args -> ppAnnType ret ++ "(*?)(" ++ intercalate ", " (map ppAnnType args) ++ ")"
 
 instance PP.Pretty AnnType where
   pretty = \case
@@ -53,6 +56,8 @@ instance PP.Pretty AnnType where
     DoubleAnnType -> "double"
     PtrAnnType tp -> PP.pretty tp <> "*"
     TypedefAnnType nm _ -> PP.pretty (BSC.unpack nm)
+    FunPtrAnnType ret args ->
+      PP.pretty ret PP.<+> PP.parens (PP.hcat (PP.punctuate PP.comma (map PP.pretty args)))
 
 -- | Information about function argument with optional name
 -- information.

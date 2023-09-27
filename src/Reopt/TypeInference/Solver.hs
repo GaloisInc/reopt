@@ -4,10 +4,13 @@ module Reopt.TypeInference.Solver (
   Ty (..),
   TyVar,
   RowVar,
+  funPtrTy,
   numTy,
   ptrTy,
   ptrTy',
+  tupleTy,
   varTy,
+  vecTy,
   SolverM,
   runSolverM,
   eqTC,
@@ -28,6 +31,8 @@ module Reopt.TypeInference.Solver (
   FTy,
   pattern FNumTy,
   pattern FPtrTy,
+  pattern FFunPtrTy,
+  pattern FUnknownFunPtrTy,
   pattern FUnknownTy,
   pattern FNamedStruct,
   pattern FStructTy,
@@ -96,8 +101,17 @@ ptrTy = Ty . PtrTy
 ptrTy' :: Ty -> Ty
 ptrTy' = Ty . PtrTy . singletonFieldMap 0
 
+tupleTy :: [Ty] -> Ty
+tupleTy = Ty . TupleTy
+
+vecTy :: Int -> Ty -> Ty
+vecTy i = Ty . VecTy i
+
 varTy :: TyVar -> Ty
 varTy = Var
+
+funPtrTy :: [Ty] -> Ty -> Ty
+funPtrTy args ret = Ty (FunPtrTy args ret)
 
 --------------------------------------------------------------------------------
 -- Compilers from Ty into ITy
@@ -114,6 +128,8 @@ compileTy (Ty ty) =
       PtrTy fm -> do
         fm' <- traverse nameTy fm
         PtrTy . RowExprVar <$> freshRowVarFM fm'
+      UnknownFunPtrTy -> pure UnknownFunPtrTy
+      FunPtrTy args ret -> FunPtrTy <$> mapM nameTy args <*> nameTy ret
       ConflictTy n -> pure (ConflictTy n)
       TupleTy ts -> TupleTy <$> traverse nameTy ts
       VecTy n ty' -> VecTy n <$> nameTy ty'
@@ -373,6 +389,12 @@ pattern FNumTy sz = FTy (NumTy sz)
 
 pattern FPtrTy :: FTy -> FTy
 pattern FPtrTy ty = FTy (PtrTy ty)
+
+pattern FFunPtrTy :: [FTy] -> FTy -> FTy
+pattern FFunPtrTy args ret = FTy (FunPtrTy args ret)
+
+pattern FUnknownFunPtrTy :: FTy
+pattern FUnknownFunPtrTy = FTy UnknownFunPtrTy
 
 pattern FUnknownTy :: FTy
 pattern FUnknownTy = UnknownTy
