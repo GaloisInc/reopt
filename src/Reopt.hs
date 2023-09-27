@@ -2699,8 +2699,8 @@ reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap = go
     let unexplored = newDiscState ^. Macaw.unexploredFunctions
 
     if null unexplored
-      then traceM "NOLOOP" >> return (newDiscState, recoverX86Output, recMod, moduleConstraints)
-      else traceM "LOOP" >> go newDiscState
+      then return (newDiscState, recoverX86Output, recMod, moduleConstraints)
+      else go newDiscState
 
 newtype IntendToRecover = IntendToRecover {getIntendToRecover :: Bool}
 intendToRecover, dontIntendToRecover :: IntendToRecover
