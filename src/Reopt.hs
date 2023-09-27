@@ -268,6 +268,7 @@ import Reopt.CFG.LLVM (
  )
 import Reopt.CFG.LLVM.X86 as LLVM (x86LLVMArchOps)
 import Reopt.CFG.Recovery (
+  FunctionPointerTypes,
   LLVMLogEvent (..),
   RecoveredFunction (llvmLogEvents, recoveredFunction),
   X86ArgInfo (ArgBV64, ArgZMM),
@@ -2353,8 +2354,9 @@ doRecoverX86 ::
   SymAddrMap 64 ->
   FunTypeMaps 64 ->
   Macaw.DiscoveryState X86_64 ->
+  FunctionPointerTypes X86_64 ->
   ReoptM X86_64 r RecoverX86Output
-doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
+doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys = do
   -- trace "Potential fun type map:" $
   --   forM_ (Map.assocs (addrTypeMap debugTypeMap)) $ \ (k, v) -> do
   --     trace (show k <> " ↦ " <> show v) (pure ())
@@ -2397,16 +2399,6 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
     let resolveFunName a = Map.lookup a funNameMap
     x86ArgumentAnalysis sysp resolveFunName knownFunTypeMap discState
 
-  -- let explored =
-  --       [ nm
-  --       | Some finfo <- Macaw.exploredFunctions discState
-  --       , let faddr = Macaw.discoveredFunAddr finfo
-  --       , let nm = Map.findWithDefault (error "Address undefined in funNameMap") faddr funNameMap
-  --       ]
-
-  -- trace "Functions explored by Macaw:" $ forM_ explored $ \ nm ->
-  --   trace (" → " <> show nm) (pure ())
-
   let
     funTypeMap :: Map BS.ByteString (MemSegmentOff 64, X86FunTypeInfo)
     funTypeMap =
@@ -2419,25 +2411,8 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
           , tp <- maybeToList $ Map.lookup faddr fDems
           ]
 
-  -- trace "fDems:" $ forM_ (Map.assocs fDems) $ \ (k, v) ->
-  --   trace (show k <> " ↦ " <> show v) (pure ())
-  -- trace "Candidates were:" (pure ())
-  -- forM_
-  --         [ (faddr, nm)
-  --         | Some finfo <- Macaw.exploredFunctions discState
-  --         , let faddr = Macaw.discoveredFunAddr finfo
-  --         , let nm = Map.findWithDefault (error "Address undefined in funNameMap") faddr funNameMap
-  --         -- , tp <- maybeToList $ Map.lookup faddr fDems
-  --         ] $ \ (a, nm) ->
-  --           trace (show a <> " ↦ " <> show nm) (pure ())
-
-  -- trace "Actual fun type map:" $
-  --   forM_ (Map.assocs funTypeMap) $ \ kv -> do
-  --     trace (show kv) (pure ())
-
   fnDefsAndLogEvents <- fmap catMaybes $
     forM (Macaw.exploredFunctions discState) $ \(Some finfo) -> do
-      --  trace ("Considering recovering " <> show (Macaw.discoveredFunAddr finfo)) $ do
       let faddr = Macaw.discoveredFunAddr finfo
       let _ = trace ("2: " <> show faddr) ()
       let dnm = Macaw.discoveredFunSymbol finfo
@@ -2474,7 +2449,7 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
                   funStepFinished Events.InvariantInference fnId invMap
                   -- Do function recovery
                   funStepStarted Events.Recovery fnId
-                  case recoverFunction sysp mem finfo invMap nm argRegs retRegs of
+                  case recoverFunction sysp mem finfo invMap nm argRegs retRegs funPtrTys of
                     Left e -> do
                       funStepFailed Events.Recovery fnId e
                       abandonBecause $ "recovery failed: " <> show (Events.recoverErrorMessage e)
@@ -2674,7 +2649,12 @@ reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap firstDiscState = 
   go firstDiscState
  where
   go discState = do
-    recoverX86Output <- doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState
+
+    -- TODO: compute this map (maybe incrementally?)
+    let funPtrTys = Map.empty
+
+    recoverX86Output <- doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState funPtrTys
+
     let recMod = recoveredModule recoverX86Output
 
     let moduleConstraints =
