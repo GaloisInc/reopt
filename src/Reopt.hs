@@ -53,6 +53,9 @@ module Reopt (
   -- * Function recovery
   Reopt.TypeInference.HeaderTypes.AnnDeclarations,
   Reopt.TypeInference.HeaderTypes.emptyAnnDeclarations,
+  IntendToRecover (IntendToRecover),
+  intendToRecover,
+  dontIntendToRecover,
   RecoveredModule,
   recoveredDefs,
   reoptPrepareForRecovery,
@@ -2699,6 +2702,11 @@ reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap = go
       then traceM "NOLOOP" >> return (newDiscState, recoverX86Output, recMod, moduleConstraints)
       else traceM "LOOP" >> go newDiscState
 
+newtype IntendToRecover = IntendToRecover {getIntendToRecover :: Bool}
+intendToRecover, dontIntendToRecover :: IntendToRecover
+intendToRecover = IntendToRecover True
+dontIntendToRecover = IntendToRecover False
+
 -- | Factors out some pre-computation we frequently do prior to running the
 -- Reopt recovery.
 reoptPrepareForRecovery ::
@@ -2708,11 +2716,13 @@ reoptPrepareForRecovery ::
   -- | Prefix to use when encountering unnamed functions
   BSC.ByteString ->
   Elf.ElfHeaderInfo 64 ->
+  -- | Whether we should perform checks relative to recovery
+  IntendToRecover ->
   ReoptM X86_64 r (X86OS, SymAddrMap 64, FunTypeMaps 64, Macaw.DiscoveryState X86_64)
-reoptPrepareForRecovery loadOpts reoptOpts hdrAnn funPrefix hdrInfo = do
+reoptPrepareForRecovery loadOpts reoptOpts hdrAnn funPrefix hdrInfo recIntent = do
   (os, initState) <- reoptX86Init loadOpts reoptOpts hdrInfo
   let symAddrMap = initDiscSymAddrMap initState
-  checkNoSymbolUsesReservedPrefix funPrefix symAddrMap
+  when (getIntendToRecover recIntent) $ checkNoSymbolUsesReservedPrefix funPrefix symAddrMap
   let ainfo = osArchitectureInfo os
   (debugTypeMap, discState) <- doDiscovery hdrAnn hdrInfo ainfo initState reoptOpts
   return (os, symAddrMap, debugTypeMap, discState)
@@ -2737,7 +2747,8 @@ recoverX86Elf ::
     , ModuleConstraints X86_64
     )
 recoverX86Elf loadOpts reoptOpts hdrAnn unnamedFunPrefix hdrInfo = do
-  (os, symAddrMap, debugTypeMap, discState) <- reoptPrepareForRecovery loadOpts reoptOpts hdrAnn unnamedFunPrefix hdrInfo
+  (os, symAddrMap, debugTypeMap, discState) <-
+    reoptPrepareForRecovery loadOpts reoptOpts hdrAnn unnamedFunPrefix hdrInfo intendToRecover
   let sysp = osPersonality os
   (finalDiscState, recoverX86Output, recMod, moduleConstraints) <-
     reoptRecoveryLoop symAddrMap reoptOpts unnamedFunPrefix sysp debugTypeMap discState

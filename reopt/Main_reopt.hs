@@ -692,7 +692,13 @@ showCFG args elfPath = do
     runReoptM printLogEvent $ do
       hdrAnn <- resolveHeader (headerPath args) (clangPath args)
       (_, _, _, discState) <-
-        reoptPrepareForRecovery (loadOptions args) reoptOpts hdrAnn (unnamedFunPrefix args) hdrInfo
+        reoptPrepareForRecovery
+          (loadOptions args)
+          reoptOpts
+          hdrAnn
+          (unnamedFunPrefix args)
+          hdrInfo
+          dontIntendToRecover
       pure $ show $ Macaw.ppDiscoveryStateBlocks discState
   handleEitherWithExit mr
 
@@ -714,7 +720,7 @@ showConstraints args elfPath = do
       funPrefix = unnamedFunPrefix args
 
     (os, symAddrMap, debugTypeMap, discState) <-
-      reoptPrepareForRecovery (loadOptions args) rOpts hdrAnn funPrefix origElf
+      reoptPrepareForRecovery (loadOptions args) rOpts hdrAnn funPrefix origElf dontIntendToRecover
 
     let sysp = osPersonality os
     recoverX86Output <-
@@ -818,10 +824,13 @@ performReopt args elfPath = do
       funPrefix = unnamedFunPrefix args
 
     (os, symAddrMap, debugTypeMap, discState) <-
-      reoptPrepareForRecovery (loadOptions args) rOpts hdrAnn funPrefix origElf
-
-    when (shouldRecover args) $
-      checkNoSymbolUsesReservedPrefix funPrefix symAddrMap
+      reoptPrepareForRecovery
+        (loadOptions args)
+        rOpts
+        hdrAnn
+        funPrefix
+        origElf
+        (IntendToRecover $ shouldRecover args)
 
     case cfgExportPath args of
       Nothing -> pure ()
