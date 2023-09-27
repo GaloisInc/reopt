@@ -58,7 +58,7 @@ module Reopt (
   -- * LLVM
   LLVMVersion,
   versionOfString,
-  renderLLVMBitcode,
+  renderLLVMIR,
   Reopt.CFG.LLVM.LLVMGenOptions (..),
   defaultLLVMGenOptions,
   LLVMConfig,
@@ -2694,8 +2694,8 @@ resolveHeader mHdrPath clangPath =
 defaultLLVMGenOptions :: LLVMGenOptions
 defaultLLVMGenOptions = LLVMGenOptions{mcExceptionIsUB = False}
 
--- | Rendered a recovered X86_64 module as LLVM bitcode
-renderLLVMBitcode ::
+-- | Render a recovered X86_64 module as LLVM IR
+renderLLVMIR ::
   LLVMGenOptions ->
   LLVMConfig ->
   -- | Operating system
@@ -2708,13 +2708,13 @@ renderLLVMBitcode ::
   , [Ann.ExternalFunctionAnn]
   , [LLVMLogEvent]
   )
-renderLLVMBitcode llvmGenOpt cfg os recMod constraints =
+renderLLVMIR llvmGenOpt llvmConfig os recMod constraints =
   -- Generate LLVM module
   let
     archOps = LLVM.x86LLVMArchOps (show os)
     (m, ann, ext, logEvents) = moduleForFunctions archOps llvmGenOpt recMod constraints
     -- Render into LLVM
-    out = HPJ.fullRender HPJ.PageMode 10000 1 pp mempty (ppLLVM cfg m)
+    out = HPJ.fullRender HPJ.PageMode 10000 1 pp mempty (ppLLVM llvmConfig m)
    in
     (out, ann, ext, logEvents)
  where

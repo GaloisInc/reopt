@@ -933,7 +933,7 @@ performReopt args elfPath = do
 
     -- Generate LLVM
     let (objLLVM, ann, ext, _logEvents) =
-          renderLLVMBitcode (llvmGenOptions args) (llvmVersion args) os recMod moduleConstraints
+          renderLLVMIR (llvmGenOptions args) (llvmVersion args) os recMod moduleConstraints
 
     -- Write LLVM if requested.
     case llvmExportPath args of

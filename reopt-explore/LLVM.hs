@@ -36,7 +36,7 @@ import Reopt (
   llvmLogEventToStrings,
   parseElfHeaderInfo64,
   recoverX86Elf,
-  renderLLVMBitcode,
+  renderLLVMIR,
   reoptWriteBuilder,
   runReoptM,
  )
@@ -203,7 +203,7 @@ exploreBinary args opts totalCount (index, fPath) = do
     IO LLVMGenResult
   generateLLVM os recMod constraints = do
     let (objLLVM, _, _, events) =
-          renderLLVMBitcode
+          renderLLVMIR
             defaultLLVMGenOptions
             latestLLVMConfig
             os

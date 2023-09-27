@@ -59,5 +59,5 @@ mkTest fp = T.testCase fp $ do
 
   withBinaryFile llvmPath WriteMode $ \h -> do
     let (llvmContents, _ann, _decl, _logEvents) =
-          renderLLVMBitcode defaultLLVMGenOptions latestLLVMConfig os recMod moduleConstraints
+          renderLLVMIR defaultLLVMGenOptions latestLLVMConfig os recMod moduleConstraints
     Builder.hPutBuilder h llvmContents
