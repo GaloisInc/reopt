@@ -671,7 +671,8 @@ logDiscEventAsReoptEvents logger symMap evt = do
     Macaw.ReportIdentifyFunction a tgt rsn -> do
       let msg =
             printf
-              "Candidate function %s %s."
+              -- ppFunReason will add a space if needed
+              "Candidate function %s%s."
               (Events.ppFnEntry (Map.lookup tgt symMap) tgt)
               (Macaw.ppFunReason rsn)
       logger $ Events.ReoptFunStepLog Events.Discovery (mkFunId a) msg
