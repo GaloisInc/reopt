@@ -55,13 +55,9 @@ import Data.Macaw.Types (
   typeRepr,
  )
 import Data.Parameterized (FoldableF, FoldableFC)
-import Data.Parameterized.NatRepr (
-  NatRepr,
-  intValue,
-  testEquality,
-  widthVal,
- )
+import Data.Parameterized.NatRepr (NatRepr, intValue, testEquality, widthVal)
 import Data.Parameterized.Some (Some (Some), viewSome)
+import Data.Parameterized.TraversableFC (toListFC)
 import Reopt.CFG.FnRep (
   FnArchConstraints,
   FnArchStmt,
@@ -89,9 +85,10 @@ import Reopt.TypeInference.Solver (
   RowVar,
   SolverM,
   StructName,
-  Ty,
+  Ty (Ty),
   TyVar,
   eqTC,
+  funPtrTy,
   isNumTC,
   numTy,
   ptrAddTC,
@@ -99,14 +96,16 @@ import Reopt.TypeInference.Solver (
   ptrTC,
   runSolverM,
   subTypeTC,
+  tupleTy,
   unifyConstraints,
-  varTy,
+  varTy, vecTy,
  )
 import Reopt.TypeInference.Solver qualified as S
 import Reopt.TypeInference.Solver.Constraints (
   ConstraintProvenance (..),
   FnRepProvenance (..),
  )
+import Reopt.TypeInference.Solver.Types (TyF (..))
 
 -- This algorithm proceeds in stages:
 -- 1. Give type variables to the arguments to all functions
@@ -505,6 +504,16 @@ emitPtr prov pointee pointer =
 -- -----------------------------------------------------------------------------
 -- Core algorithm
 
+macawTypeToReoptTy :: Some TypeRepr -> Ty
+macawTypeToReoptTy = viewSome go
+ where
+  go :: TypeRepr ty -> Ty
+  go BoolTypeRepr = numTy 1
+  go (BVTypeRepr n) = numTy (fromInteger (intValue n))
+  go (FloatTypeRepr _flt) = error "TODO: support float in type inference"
+  go (TupleTypeRepr s) = tupleTy $ toListFC go s
+  go (VecTypeRepr w tp) = vecTy (fromInteger (intValue w)) (go tp)
+
 genFnValue :: FnArchConstraints arch => FnValue arch tp -> CGenM CGenBlockContext arch Ty
 genFnValue v =
   case v of
@@ -516,6 +525,13 @@ genFnValue v =
     FnReturn frv -> funRetType frv
     FnFunctionEntryValue{} -> punt
     FnArg i _ -> argumentType i
+    FnCodePointer _addr -> pure $ Ty UnknownFunPtrTy
+    -- NOTE: not sure what to do about varags yet
+    FnTypedCodePointer _addr fty ->
+      pure $
+        funPtrTy
+          (map macawTypeToReoptTy (fnArgTypes fty))
+          (maybe (error "No return type, investigate...") macawTypeToReoptTy (fnReturnType fty)) -- FIXME (val) type?
  where
   punt = do
     warn "Punting on FnValue"

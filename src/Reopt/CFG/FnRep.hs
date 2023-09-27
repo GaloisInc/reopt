@@ -69,7 +69,7 @@ import Data.Macaw.CFG (
   ppApp,
   sexpr,
  )
-import Data.Macaw.Memory
+import Data.Macaw.Memory qualified as Macaw
 import Data.Macaw.Types (
   BVType,
   BoolType,
@@ -234,11 +234,19 @@ data FnValue (arch :: Type) (tp :: M.Type) where
     -- | Symbol name of this function.
     BSC.ByteString ->
     FnValue arch (BVType (ArchAddrWidth arch))
-  -- | Value is a function.
-  --
-  -- The int should be in the range @[0..argCount)@, and the type repr
-  -- is the type of the argument.
+  -- | Value is a function argument.  The int should be in the range
+  -- @[0..argCount)@, and the type repr is the type of the argument.
   FnArg :: !Int -> !(TypeRepr tp) -> FnValue arch tp
+  -- | Value is a constant pointer into the executable segment
+  FnCodePointer ::
+    Macaw.MemAddr (ArchAddrWidth arch) ->
+    FnValue arch (BVType (ArchAddrWidth arch))
+  -- | Value is a constant pointer into the executable segment for which we have
+  -- identified the function type through type inference
+  FnTypedCodePointer ::
+    Macaw.MemAddr (ArchAddrWidth arch) ->
+    !(FunctionType arch) ->
+    FnValue arch (BVType (ArchAddrWidth arch))
 
 ------------------------------------------------------------------------
 -- FoldFnValue
@@ -260,12 +268,12 @@ class FoldFnValue (v :: Type -> Type) where
 type FnArchConstraints arch =
   ( IsArchFn (ArchFn arch)
   , IsArchStmt (FnArchStmt arch)
-  , MemWidth (ArchAddrWidth arch)
+  , Macaw.MemWidth (ArchAddrWidth arch)
   , HasRepr (ArchFn arch (FnValue arch)) TypeRepr
   , HasRepr (ArchReg arch) TypeRepr
   )
 
-instance MemWidth (ArchAddrWidth arch) => PP.Pretty (FnValue arch tp) where
+instance Macaw.MemWidth (ArchAddrWidth arch) => PP.Pretty (FnValue arch tp) where
   pretty (FnUndefined{}) = "undef"
   pretty (FnConstantBool b) = if b then "true" else "false"
   pretty (FnConstantValue w i)
@@ -276,6 +284,8 @@ instance MemWidth (ArchAddrWidth arch) => PP.Pretty (FnValue arch tp) where
   pretty (FnReturn var) = PP.pretty var
   pretty (FnFunctionEntryValue _ n) = PP.pretty (BSC.unpack n)
   pretty (FnArg i _) = "arg" <> PP.pretty i
+  pretty (FnCodePointer addr) = "codeptr" <> PP.pretty addr
+  pretty (FnTypedCodePointer addr _fty) = "typedcodeptr" <> PP.pretty addr
 
 instance FnArchConstraints arch => PP.Pretty (FnAssignRhs arch (FnValue arch) tp) where
   pretty rhs =
@@ -289,7 +299,7 @@ instance FnArchConstraints arch => PP.Pretty (FnAssignRhs arch (FnValue arch) tp
         | i >= 0 ->
             PP.parens
               ( "0x" <> PP.pretty (showHex i "") <> " : " <> "bv"
-                  PP.<+> PP.pretty (8 * addrSize (Proxy :: Proxy (ArchAddrWidth arch)))
+                  PP.<+> PP.pretty (8 * Macaw.addrSize (Proxy :: Proxy (ArchAddrWidth arch)))
               )
         | otherwise -> error ("FnAddrWidthConstant given negative value: " ++ show i)
 
@@ -307,13 +317,13 @@ instance FnArchConstraints arch => ShowF (FnAssignment arch)
 
 archWidthTypeRepr ::
   forall p arch.
-  MemWidth (ArchAddrWidth arch) =>
+  Macaw.MemWidth (ArchAddrWidth arch) =>
   p arch ->
   TypeRepr (BVType (ArchAddrWidth arch))
-archWidthTypeRepr _ = BVTypeRepr (addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch))))
+archWidthTypeRepr _ = BVTypeRepr (Macaw.addrWidthNatRepr (Macaw.addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch))))
 
 instance
-  (MemWidth (ArchAddrWidth arch), HasRepr (ArchFn arch f) TypeRepr) =>
+  (Macaw.MemWidth (ArchAddrWidth arch), HasRepr (ArchFn arch f) TypeRepr) =>
   HasRepr (FnAssignRhs arch f) TypeRepr
   where
   typeRepr rhs =
@@ -336,6 +346,8 @@ instance FnArchConstraints arch => HasRepr (FnValue arch) TypeRepr where
       FnReturn ret -> frReturnType ret
       FnFunctionEntryValue{} -> archWidthTypeRepr (Proxy :: Proxy arch)
       FnArg _ tp -> tp
+      FnCodePointer{} -> archWidthTypeRepr (Proxy :: Proxy arch)
+      FnTypedCodePointer{} -> archWidthTypeRepr (Proxy :: Proxy arch)
 
 ------------------------------------------------------------------------
 -- FnStmt
@@ -406,20 +418,20 @@ instance FoldFnValue FnStmt where
 -- FnBlockLabel
 
 -- | A block label
-newtype FnBlockLabel w = FnBlockLabel {fnBlockLabelAddr :: MemSegmentOff w}
+newtype FnBlockLabel w = FnBlockLabel {fnBlockLabelAddr :: Macaw.MemSegmentOff w}
   deriving (Eq, Ord)
 
 -- | Render block label from segment offset.
-fnBlockLabelFromAddr :: MemSegmentOff w -> FnBlockLabel w
+fnBlockLabelFromAddr :: Macaw.MemSegmentOff w -> FnBlockLabel w
 fnBlockLabelFromAddr = FnBlockLabel
 
 instance PP.Pretty (FnBlockLabel w) where
   pretty (FnBlockLabel s) =
     let
-      a = segoffAddr s
-      o = memWordToUnsigned (addrOffset a)
+      a = Macaw.segoffAddr s
+      o = Macaw.memWordToUnsigned (Macaw.addrOffset a)
      in
-      "block_" <> PP.pretty (addrBase a) <> "_" <> PP.pretty (showHex o "")
+      "block_" <> PP.pretty (Macaw.addrBase a) <> "_" <> PP.pretty (showHex o "")
 
 -- | Render block label as a string
 fnBlockLabelString :: FnBlockLabel w -> String
@@ -439,7 +451,7 @@ data FnJumpTarget arch = FnJumpTarget
   -- These must match the type of the jump target.
   }
 
-instance MemWidth (ArchAddrWidth arch) => PP.Pretty (FnJumpTarget arch) where
+instance Macaw.MemWidth (ArchAddrWidth arch) => PP.Pretty (FnJumpTarget arch) where
   pretty tgt = PP.pretty (fnJumpLabel tgt) PP.<+> PP.encloseSep PP.lbracket PP.rbracket " " phiVals
    where
     phiVals = V.toList $ viewSome PP.pretty <$> fnJumpPhiValues tgt
@@ -514,7 +526,7 @@ data FnBlockInvariant arch where
   --
   -- @o@ is typically negative on processors whose stacks grow down.
   FnStackOff ::
-    !(MemInt (ArchAddrWidth arch)) ->
+    !(Macaw.MemInt (ArchAddrWidth arch)) ->
     !(BoundLoc (ArchReg arch) (BVType (ArchAddrWidth arch))) ->
     FnBlockInvariant arch
 
@@ -595,7 +607,7 @@ instance FoldFnValue FnBlock where
 -- This currently isn't the case, as Phi nodes still use `ArchReg` to index the
 -- nodes.  However, this will be changed.
 data Function arch = Function
-  { fnAddr :: !(MemSegmentOff (ArchAddrWidth arch))
+  { fnAddr :: !(Macaw.MemSegmentOff (ArchAddrWidth arch))
   -- ^ The address for this function
   , fnType :: !(FunctionType arch)
   -- ^ Type of this  function
@@ -641,7 +653,7 @@ instance
 
 -- | A function declaration that has type information, but no recovered definition.
 data FunctionDecl arch = FunctionDecl
-  { funDeclAddr :: !(MemSegmentOff (ArchAddrWidth arch))
+  { funDeclAddr :: !(Macaw.MemSegmentOff (ArchAddrWidth arch))
   -- ^ Address of function in binary.
   , funDeclName :: !BSC.ByteString
   -- ^ Symbol name for function.

@@ -30,6 +30,10 @@ data TyF rvar f
     TupleTy [f]
   | -- | A vector
     VecTy Int f
+  | -- | An unknown function pointer type
+    UnknownFunPtrTy
+  | -- | A known function pointer type
+    FunPtrTy [f] f
   deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
 
 -- | An unrolled ITy
@@ -69,8 +73,8 @@ recTyByteWidth ptrSz = offsetAfterLast . last
  where
   offsetAfterLast (o, ty) = fromIntegral o + tyByteWidth ptrSz ty
 
--- | This shoold only be called on types which can occur within a
--- RecTy, i.e., not records.
+-- | This should only be called on types which can occur within a RecTy, i.e.,
+-- not records.
 tyByteWidth :: Int -> FTy -> Integer
 tyByteWidth ptrSz UnknownTy = fromIntegral ptrSz `div` 8
 tyByteWidth _ptrSz StructTy{} = error "Saw a StructTy in tyByteWidth"
@@ -79,6 +83,8 @@ tyByteWidth ptrSz (FTy ty) =
   case ty of
     NumTy n -> fromIntegral n `div` 8
     PtrTy _ -> fromIntegral ptrSz `div` 8
+    UnknownFunPtrTy -> fromIntegral ptrSz `div` 8
+    FunPtrTy{} -> fromIntegral ptrSz `div` 8
     ConflictTy n -> fromIntegral n `div` 8
     TupleTy{} -> error "Saw a TupleTy in tyByteWidth"
     VecTy{} -> error "Saw a VecTy in tyByteWidth"
@@ -98,17 +104,21 @@ recTyToLLVMType ptrSz fields = L.Struct (go 0 fields)
 
 -- c.f. typeToLLVMType
 tyToLLVMType :: Int -> FTy -> L.Type
-tyToLLVMType ptrSz UnknownTy =
-  L.PrimType (L.Integer (fromIntegral ptrSz))
-tyToLLVMType _ptrSz (NamedStruct s) = L.Alias (L.Ident s)
-tyToLLVMType ptrSz (StructTy fm) = recTyToLLVMType ptrSz (Map.assocs (getFieldMap fm))
-tyToLLVMType ptrSz (FTy ty) =
-  case ty of
-    NumTy n -> L.PrimType (L.Integer (fromIntegral n))
-    PtrTy ty' -> L.PtrTo $ tyToLLVMType ptrSz ty'
-    ConflictTy n -> L.PrimType (L.Integer (fromIntegral n))
-    TupleTy ts -> L.Struct (map (tyToLLVMType ptrSz) ts)
-    VecTy n ty' -> L.Vector (fromIntegral n) (tyToLLVMType ptrSz ty')
+tyToLLVMType ptrSz = go
+ where
+  go :: FTy -> L.Type
+  go UnknownTy = L.PrimType (L.Integer (fromIntegral ptrSz))
+  go (NamedStruct s) = L.Alias (L.Ident s)
+  go (StructTy fm) = recTyToLLVMType ptrSz (Map.assocs (getFieldMap fm))
+  go (FTy ty) =
+    case ty of
+      NumTy n -> L.PrimType (L.Integer (fromIntegral n))
+      PtrTy ty' -> L.PtrTo $ tyToLLVMType ptrSz ty'
+      UnknownFunPtrTy -> L.PtrTo L.Opaque
+      FunPtrTy args ret -> L.PtrTo $ L.FunTy (go ret) (map go args) False
+      ConflictTy n -> L.PrimType (L.Integer (fromIntegral n))
+      TupleTy ts -> L.Struct (map go ts)
+      VecTy n ty' -> L.Vector (fromIntegral n) (go ty')
 
 --------------------------------------------------------------------------------
 -- Instances
@@ -124,6 +134,8 @@ instance (PP.Pretty f, PP.Pretty rv) => PP.Pretty (TyF rv f) where
   pretty = \case
     NumTy sz -> "i" <> PP.pretty sz
     PtrTy t -> "ptr " <> PP.pretty t
+    UnknownFunPtrTy -> "? (???)*"
+    FunPtrTy args ret -> PP.pretty ret <> " (" <> PP.hcat (PP.punctuate PP.comma (map PP.pretty args)) <> ")*"
     ConflictTy n -> "![" <> PP.pretty n <> "]"
     TupleTy ts -> PP.tupled (map PP.pretty ts)
     VecTy n ty -> "< " <> PP.pretty n <> " x " <> PP.pretty ty <> " >"
@@ -150,6 +162,8 @@ instance (FreeTyVars rvar, FreeTyVars f) => FreeTyVars (TyF rvar f) where
   freeTyVars = \case
     NumTy _ -> Set.empty
     PtrTy t -> freeTyVars t
+    UnknownFunPtrTy -> Set.empty
+    FunPtrTy args ret -> freeTyVars ret `Set.union` Set.unions (map freeTyVars args)
     ConflictTy{} -> Set.empty
     TupleTy ts -> foldMap freeTyVars ts
     VecTy _ ty -> freeTyVars ty
@@ -181,6 +195,8 @@ instance (FreeRowVars r, FreeRowVars f) => FreeRowVars (TyF r f) where
   freeRowVars = \case
     NumTy _ -> Set.empty
     PtrTy t -> freeRowVars t
+    UnknownFunPtrTy -> Set.empty
+    FunPtrTy args ret -> freeRowVars ret `Set.union` Set.unions (map freeRowVars args)
     ConflictTy{} -> Set.empty
     TupleTy ts -> foldMap freeRowVars ts
     VecTy _ ty -> freeRowVars ty

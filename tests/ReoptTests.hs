@@ -51,7 +51,7 @@ mkTest fp = T.testCase fp $ do
   mr <-
     runReoptM logger $ do
       recoverX86Elf loadOpts reoptOpts hdrAnn "reopt" hdrInfo
-  (os, discState, recovOut, moduleConstraints) <- either (fail . show) pure mr
+  (os, discState, recovOut, _, moduleConstraints) <- either (fail . show) pure mr
   let recMod = recoveredModule recovOut
 
   writeFile blocks_path $ show $ ppDiscoveryStateBlocks discState
@@ -59,5 +59,5 @@ mkTest fp = T.testCase fp $ do
 
   withBinaryFile llvmPath WriteMode $ \h -> do
     let (llvmContents, _ann, _decl, _logEvents) =
-          renderLLVMBitcode defaultLLVMGenOptions latestLLVMConfig os recMod moduleConstraints
+          renderLLVMIR defaultLLVMGenOptions latestLLVMConfig os recMod moduleConstraints
     Builder.hPutBuilder h llvmContents

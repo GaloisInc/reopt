@@ -166,11 +166,11 @@ data RecoverError w = RecoverErrorAt
 -------------------------------------------------------------------------------
 --  Other
 
--- | Identifies a step in Reopt's recompilation pipeline that
--- is over all functions.
+-- | Identifies a step in Reopt's recompilation pipeline that is over all
+-- functions.
 --
--- The parameter is used to represent information returned if the
--- step completes successfully.
+-- The `r` parameter is used to represent information returned if the step
+-- completes successfully.
 data ReoptGlobalStep arch r where
   -- | Initial argument checking and setup for discovery.
   DiscoveryInitialization :: ReoptGlobalStep arch (DiscoveryState arch)
@@ -306,8 +306,12 @@ data ReoptLogEvent arch where
   ReoptGlobalStepStarted :: !(ReoptGlobalStep arch a) -> ReoptLogEvent arch
   -- | Indicate a step completed successfully.
   ReoptGlobalStepFinished :: !(ReoptGlobalStep arch a) -> !a -> ReoptLogEvent arch
+  -- | Any information message.
+  ReoptGlobalStepInfo :: !(ReoptGlobalStep arch a) -> !String -> ReoptLogEvent arch
   -- | Log a warning.
   ReoptGlobalStepWarning :: !(ReoptGlobalStep arch a) -> !String -> ReoptLogEvent arch
+  -- | Any information message.
+  ReoptFunStepInfo :: !(ReoptFunStep arch r e a) -> !String -> ReoptLogEvent arch
   -- | Indicates we started as step
   ReoptFunStepStarted :: !(ReoptFunStep arch r e a) -> !FunId -> ReoptLogEvent arch
   -- | Indicate a step completed successfully.
@@ -350,6 +354,9 @@ logEndOf = withHerald "END"
 logError :: String -> IO ()
 logError = withHerald "ERROR"
 
+logInfo :: String -> IO ()
+logInfo = withHerald "INFO"
+
 logStep :: String -> IO ()
 logStep = withHerald "STEP"
 
@@ -365,12 +372,11 @@ printLogEvent ::
   IO ()
 printLogEvent event = do
   case event of
-    ReoptGlobalStepStarted s ->
-      logBeginOf $ ppGlobalStep s
-    ReoptGlobalStepFinished s _ ->
-      logEndOf $ ppGlobalStep s
-    ReoptGlobalStepWarning _st msg ->
-      logWarning msg
+    ReoptGlobalStepStarted s -> logBeginOf $ ppGlobalStep s
+    ReoptGlobalStepFinished s _ -> logEndOf $ ppGlobalStep s
+    ReoptGlobalStepInfo _st msg -> logInfo msg
+    ReoptGlobalStepWarning _st msg -> logWarning msg
+    ReoptFunStepInfo _st msg -> logInfo msg
     ReoptFunStepStarted s f ->
       logBeginOf $ printf "%s function %s" (ppFunStep s) (ppFunId f)
     ReoptFunStepFinished s f _ ->
@@ -380,28 +386,26 @@ printLogEvent event = do
         case s of
           Discovery ->
             unlines $
-              [ printf "Block 0x%x: %s" (discErrorBlockAddr de) (show (discErrorMessage de))
+              [ printf "Discovery failed (0x%x): %s" (discErrorBlockAddr de) (show (discErrorMessage de))
               | de <- e
               ]
                 ++ ["Incomplete."]
           InvariantInference ->
             printf
-              "Block: 0x%x: %s"
+              "Invariant inference failed (0x%x): %s"
               (segoffWord64 (ruBlock e))
               (ppRegisterUseErrorReason (ruReason e))
           Recovery ->
             printf
-              "Failed (0x%x:%d, %s): %s"
+              "Recovery failed (0x%x:%d, %s): %s"
               (segoffWord64 (recoverErrorBlock e))
               (recoverErrorInsnIndex e)
               (ppReoptErrorTag (recoverErrorTag e))
               (recoverErrorMessage e)
           AnnotationGeneration ->
             printf "%s" e
-    ReoptFunStepLog _st _f msg ->
-      logStep msg
-    ReoptFunStepAllFinished _ _ ->
-      pure ()
+    ReoptFunStepLog _st _f msg -> logStep msg
+    ReoptFunStepAllFinished _ _ -> pure ()
 
 -------------------------------------------------------------------------------
 -- ReoptFatalErrors

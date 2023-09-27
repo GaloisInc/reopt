@@ -158,6 +158,7 @@ executable reopt
     containers,
     directory,
     elf-edit,
+    extra,
     filepath,
     generic-lens,
     lens,

@@ -91,8 +91,8 @@ isElfFile path = do
         Left (_e :: IOException) -> pure False
         Right bytes -> pure $ Elf.elfMagic `BS.isPrefixOf` bytes
 
--- | Visit an executable elf file, or recursively search for and visit
--- each such file in a directory.
+-- | Visit an executable ELF file, or recursively search for and visit each such
+-- file in a directory.
 withElfExeFilesInDir ::
   (a -> FilePath -> IO a) ->
   a ->

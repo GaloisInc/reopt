@@ -145,13 +145,30 @@ parseStructUnion (C.CStruct tag _mi _mdecl _attrs n) =
     C.CStructTag -> errorAt n "Struct is not supported."
     C.CUnionTag -> errorAt n "Union is not supported."
 
--- | Parser derived declarators.
+parseTypeDecl :: C.NodeInfo -> C.CDeclarationSpecifier C.NodeInfo -> CParser C.CTypeSpec
+parseTypeDecl _ (C.CTypeSpec spec) = return spec
+parseTypeDecl n _ = errorAt n "Expected type specification"
+
+parseTypeDecls :: C.CDeclaration C.NodeInfo -> CParser C.CTypeSpec
+-- NOTE (val) So far I'm only seeing singleton lists here, not sure why.
+parseTypeDecls (C.CDecl [decl] _ n) = parseTypeDecl n decl
+parseTypeDecls (C.CDecl _decls _ n) =
+  errorAt n "Expected single type spec, investigate."
+parseTypeDecls (C.CStaticAssert _ _ n) =
+  errorAt n "Expected declaration, found static assert, when parsing type declaration"
+
+-- | Parse derived declarators.
 parseTypeDerivedDecl :: [C.CDerivedDeclarator C.NodeInfo] -> AnnType -> CParser AnnType
 parseTypeDerivedDecl [] tp = pure tp
 parseTypeDerivedDecl (C.CPtrDeclr _ _ : rest) tp = do
   parseTypeDerivedDecl rest $! PtrAnnType tp
 parseTypeDerivedDecl (C.CArrDeclr _ _ n : _) _tp = do
   errorAt n "Arrays are not supported."
+parseTypeDerivedDecl (C.CFunDeclr (Right (decls, False)) _attrs _n : rest) tp = do
+  typeSpecs <- mapM parseTypeDecls decls
+  args <- mapM (parseType emptyQualMods) typeSpecs
+  parseTypeDerivedDecl rest $! FunPtrAnnType tp args
+  -- errorAt n $ "decls: " ++ show decls ++ "\nattrs: " ++ show attrs ++ "\ntp: " ++ show tp
 parseTypeDerivedDecl (C.CFunDeclr _ _ n : _) _tp = do
   errorAt n "Function declarations are not supported in this context."
 

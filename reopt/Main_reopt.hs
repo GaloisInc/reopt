@@ -18,44 +18,32 @@ import Data.ElfEdit (
  )
 import Data.ElfEdit qualified as Elf
 import Data.Generics.Labels ()
-import Data.IORef (
-  IORef,
-  modifyIORef',
-  newIORef,
-  readIORef,
- )
-import Data.List (
-  intercalate,
-  nub,
-  stripPrefix,
-  (\\),
- )
-import Data.Macaw.Analysis.RegisterUse (
-  ppRegisterUseErrorReason,
-  ruReason,
- )
-import Data.Macaw.DebugLogging
-import Data.Macaw.Discovery (
-  DiscoveryOptions (..),
-  defaultDiscoveryOptions,
-  memory,
-  ppDiscoveryStateBlocks,
- )
-import Data.Maybe (
-  fromMaybe,
-  isJust,
-  isNothing,
- )
-import Data.Parameterized.Some (Some (Some))
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
+import Data.List qualified as List
+import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text qualified as T
 import Data.Version (Version (versionBranch))
 import Data.Word (Word64)
 import GHC.Generics (Generic)
 import Numeric (readHex)
 import Options.Applicative
-import Paths_reopt (version)
 import Prettyprinter qualified as PP
 import Prettyprinter.Render.Text qualified as PP
+import System.Exit (exitFailure)
+import System.FilePath (splitFileName)
+import System.IO qualified as IO
+import System.IO.Error (
+  ioeGetErrorString,
+  ioeGetErrorType,
+  isUserError,
+ )
+import Text.Printf (printf)
+
+import Data.Macaw.Analysis.RegisterUse qualified as Macaw
+import Data.Macaw.DebugLogging qualified as Macaw
+import Data.Macaw.Discovery qualified as Macaw
+import Data.Parameterized.Some (Some (Some))
+
 import Reopt
 import Reopt.ELFArchInfo (getElfArchInfo)
 import Reopt.EncodeInvariants (
@@ -77,11 +65,7 @@ import Reopt.Occam (
   toOccamManifest,
  )
 import Reopt.Server (runServer)
-import Reopt.TypeInference.ConstraintGen (
-  ModuleConstraints (mcNamedTypes, mcWarnings),
-  genModuleConstraints,
-  showInferredTypes,
- )
+import Reopt.TypeInference.ConstraintGen (ModuleConstraints (..), genModuleConstraints)
 import Reopt.TypeInference.Pretty (ppFunction)
 import Reopt.Utils.Exit (
   checkedReadFile,
@@ -96,20 +80,13 @@ import Reopt.X86 (
   osLinkName,
   osPersonality,
  )
-import System.Exit (exitFailure)
-import System.FilePath (splitFileName)
-import System.IO qualified as IO
-import System.IO.Error (
-  ioeGetErrorString,
-  ioeGetErrorType,
-  isUserError,
- )
-import Text.Printf (printf)
+
+import Paths_reopt (version)
 
 reoptVersion :: String
 reoptVersion = printf "Reopt binary reoptimizer (reopt) %s" v
  where
-  v = intercalate "." $ map (printf "%d") $ versionBranch version
+  v = List.intercalate "." $ map (printf "%d") $ versionBranch version
 
 -- | Write a builder object to a file if defined or standard out if not.
 writeOutput :: Maybe FilePath -> (IO.Handle -> IO a) -> IO a
@@ -125,7 +102,7 @@ unintercalate punct = reverse . go [] ""
   go acc "" [] = acc
   go acc thisAcc [] = reverse thisAcc : acc
   go acc thisAcc str'@(x : xs)
-    | Just sfx <- stripPrefix punct str' = go (reverse thisAcc : acc) "" sfx
+    | Just sfx <- List.stripPrefix punct str' = go (reverse thisAcc : acc) "" sfx
     | otherwise = go acc (x : thisAcc) xs
 
 ------------------------------------------------------------------------
@@ -155,7 +132,7 @@ data Action
 -- | Command line arguments.
 data Args = Args
   { reoptAction :: !Action
-  , debugKeys :: [DebugClass]
+  , debugKeys :: [Macaw.DebugClass]
   -- ^ Debug information TODO: See if we can omit this.
   , outputPath :: !(Maybe FilePath)
   -- ^ Path to output
@@ -199,7 +176,7 @@ data Args = Args
   -- ^ List of function entry points that we exclude for translation.
   , loadBaseAddress :: !(Maybe Word64)
   -- ^ Address to load binary at if relocatable.
-  , discOpts :: !DiscoveryOptions
+  , discOpts :: !Macaw.DiscoveryOptions
   -- ^ Options affecting discovery
   , unnamedFunPrefix :: !BS.ByteString
   -- ^ Prefix for unnamed functions identified in code discovery.
@@ -359,22 +336,22 @@ llvmVersionP =
       Just c -> pure c
       Nothing -> Left $ printf "Unsupported LLVM version %s" s
 
-parseDebugFlags :: [DebugClass] -> String -> Either String [DebugClass]
+parseDebugFlags :: [Macaw.DebugClass] -> String -> Either String [Macaw.DebugClass]
 parseDebugFlags oldKeys cl =
   case cl of
     '-' : cl' -> do
       ks <- getKeys cl'
-      return (oldKeys \\ ks)
+      return (oldKeys List.\\ ks)
     cl' -> do
       ks <- getKeys cl'
-      return (nub $ oldKeys ++ ks)
+      return (List.nub $ oldKeys ++ ks)
  where
-  getKeys "all" = Right allDebugKeys
-  getKeys s = case parseDebugKey s of
+  getKeys "all" = Right Macaw.allDebugKeys
+  getKeys s = case Macaw.parseDebugKey s of
     Nothing -> Left $ "Unknown debug key `" ++ s ++ "'"
     Just k -> Right [k]
 
-debugKeysP :: Parser [DebugClass]
+debugKeysP :: Parser [Macaw.DebugClass]
 debugKeysP =
   option (eitherReader validate) $
     long "debug"
@@ -387,7 +364,7 @@ debugKeysP =
             ++ "with comma-separated keys.  Keys may be preceded by a '-' which "
             ++ "means disable that key.\n"
             ++ "Supported keys: all, "
-            ++ intercalate ", " (map debugKeyName allDebugKeys)
+            ++ List.intercalate ", " (map Macaw.debugKeyName Macaw.allDebugKeys)
         )
  where
   validate s = do
@@ -624,9 +601,9 @@ arguments =
     <*> many includeAddrP
     <*> many excludeAddrP
     <*> optional loadBaseAddressP
-    <*> ( DiscoveryOptions
+    <*> ( Macaw.DiscoveryOptions
             -- This was never exposed to the CLI
-            (exploreFunctionSymbols defaultDiscoveryOptions)
+            (Macaw.exploreFunctionSymbols Macaw.defaultDiscoveryOptions)
             <$> exploreCodeAddrInMemP
             <*> logAtAnalyzeFunctionP
             <*> logAtAnalyzeBlockP
@@ -727,7 +704,7 @@ showCFG args elfPath = do
       initState <- reoptRunInit $ doInit (loadOptions args) hdrInfo ainfo pltFn reoptOpts
       (_, discState) <- doDiscovery hdrAnn hdrInfo ainfo initState reoptOpts
       -- Print discovery
-      pure $ show $ ppDiscoveryStateBlocks discState
+      pure $ show $ Macaw.ppDiscoveryStateBlocks discState
   handleEitherWithExit mr
 
 -- | Show the constraints generated by the type inference step.
@@ -760,7 +737,7 @@ showConstraints args elfPath = do
       doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState
 
     let recMod = recoveredModule recoverX86Output
-    pure $ genModuleConstraints recMod (memory discState) (traceTypeUnification args) (traceConstraintOrigins args)
+    pure $ genModuleConstraints recMod (Macaw.memory discState) (traceTypeUnification args) (traceConstraintOrigins args)
 
   mc <- handleEitherWithExit mr
 
@@ -803,7 +780,7 @@ collectInvariants ref evt = do
       let enc = encodeInvariantMsg addr invMap
       seq enc $ modifyIORef' ref (enc :)
     ReoptFunStepFailed InvariantInference (FunId addr _mnm) e -> do
-      let enc = encodeInvariantFailedMsg addr (ppRegisterUseErrorReason (ruReason e))
+      let enc = encodeInvariantFailedMsg addr (Macaw.ppRegisterUseErrorReason (Macaw.ruReason e))
       seq enc $ modifyIORef' ref (enc :)
     _ -> do
       pure ()
@@ -856,28 +833,33 @@ performReopt args elfPath = do
       funPrefix :: BSC.ByteString
       funPrefix = unnamedFunPrefix args
 
-    (os, initState) <- reoptX86Init (loadOptions args) rOpts origElf
-    let symAddrMap = initDiscSymAddrMap initState
+    (os, symAddrMap, debugTypeMap, discState) <-
+      reoptPrepareForRecovery (loadOptions args) rOpts hdrAnn funPrefix origElf
 
     when (shouldRecover args) $
       checkSymbolUnused funPrefix symAddrMap
-
-    let ainfo = osArchitectureInfo os
-    (debugTypeMap, discState) <- doDiscovery hdrAnn origElf ainfo initState rOpts
 
     case cfgExportPath args of
       Nothing -> pure ()
       Just path -> do
         reoptWrite CfgFileType path $ \h -> do
-          PP.hPutDoc h (ppDiscoveryStateBlocks discState)
+          PP.hPutDoc h (Macaw.ppDiscoveryStateBlocks discState)
 
     unless (shouldRecover args) $ reoptEndNow ()
 
     let sysp = osPersonality os
-    recoverX86Output <-
-      doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState
-    let recMod = recoveredModule recoverX86Output
+    (_, recoverX86Output, recMod, moduleConstraints) <-
+      reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap discState
+
+    -- forM_ (recoveredDefs recMod) $ \ f -> do
+    --   trace "FUNCTION" (pure ())
+    --   trace (show (PP.pretty f)) (pure ())
+
     let relinkerInfo = mergeRelations recoverX86Output
+    case relinkerInfoExportPath args of
+      Nothing -> pure ()
+      Just path -> do
+        reoptWriteByteString RelinkerInfoFileType path (Aeson.encode relinkerInfo)
 
     case fnsExportPath args of
       Nothing -> pure ()
@@ -892,19 +874,6 @@ performReopt args elfPath = do
         invariants <- reoptIO $ reverse <$> readIORef invariantsRef
         let buffer = AE.encodingToLazyByteString (AE.list id invariants)
         reoptWriteByteString AnnotationsFileType path buffer
-
-    case relinkerInfoExportPath args of
-      Nothing -> pure ()
-      Just path -> do
-        reoptWriteByteString RelinkerInfoFileType path (Aeson.encode relinkerInfo)
-
-    -- Generate constraints
-    let moduleConstraints =
-          genModuleConstraints
-            recMod
-            (memory discState)
-            (traceTypeUnification args)
-            (traceConstraintOrigins args)
 
     -- FIXME: move
     let
@@ -933,7 +902,7 @@ performReopt args elfPath = do
 
     -- Generate LLVM
     let (objLLVM, ann, ext, _logEvents) =
-          renderLLVMBitcode (llvmGenOptions args) (llvmVersion args) os recMod moduleConstraints
+          renderLLVMIR (llvmGenOptions args) (llvmVersion args) os recMod moduleConstraints
 
     -- Write LLVM if requested.
     case llvmExportPath args of
@@ -1053,17 +1022,18 @@ displayConstraintsInformation :: ModuleConstraints arch -> IO ()
 displayConstraintsInformation moduleConstraints = do
   putStrLn "Warnings"
   putStrLn (unlines (map ((++) "\t" . show) (mcWarnings moduleConstraints)))
-  -- putStrLn "Constraints (generated)"
-  -- putStrLn (unlines (map (show . PP.indent 4 . PP.pretty) (mcConstraints moduleConstraints)))
-  -- putStrLn "Constraints (solving)"
-  -- putStrLn (unlines (map (show . PP.indent 4 . PP.pretty) (mcTyConstraints moduleConstraints)))
-  putStrLn "Inferred types"
-  putStrLn (showInferredTypes moduleConstraints)
+
+-- putStrLn "Constraints (generated)"
+-- putStrLn (unlines (map (show . PP.indent 4 . PP.pretty) (mcConstraints moduleConstraints)))
+-- putStrLn "Constraints (solving)"
+-- putStrLn (unlines (map (show . PP.indent 4 . PP.pretty) (mcTyConstraints moduleConstraints)))
+-- putStrLn "Inferred types"
+-- putStrLn (showInferredTypes moduleConstraints)
 
 main' :: IO ()
 main' = do
   args <- getCommandLineArgs
-  setDebugKeys (args ^. #debugKeys)
+  Macaw.setDebugKeys (args ^. #debugKeys)
   case args ^. #reoptAction of
     DumpDisassembly file -> dumpDisassembly args file
     ShowCFG file ->

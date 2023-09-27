@@ -36,7 +36,7 @@ import Reopt (
   llvmLogEventToStrings,
   parseElfHeaderInfo64,
   recoverX86Elf,
-  renderLLVMBitcode,
+  renderLLVMIR,
   reoptWriteBuilder,
   runReoptM,
  )
@@ -182,7 +182,7 @@ exploreBinary args opts totalCount (index, fPath) = do
               recoverLogEvent summaryRef statsRef
     let annDecl = emptyAnnDeclarations
     hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
-    (os, _, recovOut, constraints) <-
+    (os, _, recovOut, _, constraints) <-
       -- (os, _, recMod, constraints, _, logEvents) <-
       handleEitherWithExit
         =<< runReoptM logger (recoverX86Elf lOpts opts annDecl unnamedFunPrefix hdrInfo)
@@ -203,7 +203,7 @@ exploreBinary args opts totalCount (index, fPath) = do
     IO LLVMGenResult
   generateLLVM os recMod constraints = do
     let (objLLVM, _, _, events) =
-          renderLLVMBitcode
+          renderLLVMIR
             defaultLLVMGenOptions
             latestLLVMConfig
             os
