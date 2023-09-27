@@ -65,9 +65,11 @@ exportEvent h evt =
   case evt of
     ReoptGlobalStepStarted{} -> pure ()
     ReoptGlobalStepFinished{} -> pure ()
+    ReoptGlobalStepInfo{} -> pure ()
     ReoptGlobalStepWarning{} -> pure ()
     ReoptFunStepStarted{} -> pure ()
     ReoptFunStepFinished{} -> pure ()
+    ReoptFunStepInfo{} -> pure ()
     ReoptFunStepFailed fs fId fsErr ->
       case fs of
         Discovery -> do

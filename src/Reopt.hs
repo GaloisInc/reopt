@@ -14,6 +14,7 @@ module Reopt (
   reoptIO,
   reoptEndNow,
   reoptFatalError,
+  globalStepInfo,
   globalStepStarted,
   globalStepWarning,
   globalStepFinished,
@@ -21,6 +22,7 @@ module Reopt (
   funStepFinished,
   funStepFailed,
   funStepAllFinished,
+  funStepInfo,
   Events.ReoptFatalError (..),
   Events.ReoptFileType (..),
   -- Initiization
@@ -1679,6 +1681,9 @@ globalStepStarted s = reoptLog (Events.ReoptGlobalStepStarted s)
 globalStepFinished :: Events.ReoptGlobalStep arch a -> a -> ReoptM arch r ()
 globalStepFinished s a = reoptLog (Events.ReoptGlobalStepFinished s a)
 
+globalStepInfo :: Events.ReoptGlobalStep arch a -> String -> ReoptM arch r ()
+globalStepInfo s m = reoptLog (Events.ReoptGlobalStepInfo s m)
+
 globalStepWarning :: Events.ReoptGlobalStep arch a -> String -> ReoptM arch r ()
 globalStepWarning s m = reoptLog (Events.ReoptGlobalStepWarning s m)
 
@@ -1693,6 +1698,9 @@ funStepFinished s f r = reoptLog (Events.ReoptFunStepFinished s f r)
 
 funStepAllFinished :: Events.ReoptFunStep arch r e a -> a -> ReoptM arch z ()
 funStepAllFinished f a = reoptLog (Events.ReoptFunStepAllFinished f a)
+
+funStepInfo :: Events.ReoptFunStep arch r e a -> String -> ReoptM arch z ()
+funStepInfo s msg = reoptLog (Events.ReoptFunStepInfo s msg)
 
 ---------------------------------------------------------------------------------
 -- Initial type inference
@@ -1751,14 +1759,15 @@ headerTypeMap hdrAnn dynDepsTypeMap symAddrMap noretMap = do
         ReoptM arch r (Map (ArchSegmentOff arch) ReoptFunType)
       insSymType m (sym, annTp) = do
         case symAddrMapLookup symAddrMap sym of
-          Left SymAddrMapNotFound -> do
-            -- Silently drop symbols without addresses as they may be undefined.
-            pure m
+          -- Silently drop symbols without addresses as they may be undefined.
+          Left SymAddrMapNotFound -> pure m
           Left SymAddrMapAmbiguous -> do
             globalStepWarning Events.HeaderTypeInference $
-              "Ambiguous symbol " ++ BSC.unpack sym ++ "."
+              "Ambiguous symbol " ++ BSC.unpack sym
             pure m
           Right addr -> do
+            globalStepInfo Events.HeaderTypeInference $
+              "Found function type for symbol " ++ BSC.unpack sym ++ " : " <> show (PP.pretty annTp)
             pure $! Map.insert addr annTp m
     foldlM insSymType Map.empty (Map.toList nameAnnTypeMap)
 
@@ -2377,22 +2386,25 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
       let dnm = Macaw.discoveredFunSymbol finfo
       let fnId = Events.funId faddr dnm
       let nm = Map.findWithDefault (error "Address undefined in funNameMap") faddr funNameMap
+      let abandonBecause reason = do
+            funStepInfo Events.Discovery ("Abandoning " <> BSC.unpack nm <> " because " <> reason)
+            return Nothing
       case snd <$> Map.lookup nm funTypeMap of
         Nothing -> do
           -- TODO: Check an error has already been reported on this.
-          pure Nothing
+          abandonBecause "we don't know its type"
         Just (X86PrintfFunType _) -> do
           -- Var-args cannot be recovered.
-          pure Nothing
+          abandonBecause "it is variadic"
         Just X86OpenFunType -> do
           -- open cannot be recovered.
-          pure Nothing
+          abandonBecause "the open function cannot be recovered"
         Just (X86NonvarargFunType argRegs retRegs) -> do
           case checkFunction finfo of
             FunctionIncomplete _errTag -> do
-              pure Nothing
+              abandonBecause "the function is incomplete"
             FunctionHasPLT -> do
-              pure Nothing
+              abandonBecause "the function has a PLT"
             FunctionOK -> do
               funStepStarted Events.InvariantInference fnId
               let resolveFunName a = Map.lookup a funNameMap
@@ -2400,7 +2412,7 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
               case x86BlockInvariants sysp mem resolveFunName resolveFunType finfo retRegs of
                 Left e -> do
                   funStepFailed Events.InvariantInference fnId e
-                  pure Nothing
+                  abandonBecause "we could not infer invariants"
                 Right invMap -> do
                   funStepFinished Events.InvariantInference fnId invMap
                   -- Do function recovery
@@ -2408,7 +2420,7 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
                   case recoverFunction sysp mem finfo invMap nm argRegs retRegs of
                     Left e -> do
                       funStepFailed Events.Recovery fnId e
-                      pure Nothing
+                      abandonBecause $ "recovery failed: " <> show (Events.recoverErrorMessage e)
                     Right fn -> do
                       funStepFinished Events.Recovery fnId ()
                       pure (Just fn)
