@@ -12,10 +12,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Builder qualified as Builder
 import Data.ByteString.Char8 qualified as BSC
 import Data.Either (rights)
-import Data.ElfEdit (
-  ElfSection (elfSectionAddr, elfSectionData, elfSectionName),
-  elfSections,
- )
+import Data.ElfEdit qualified as ELF
 import Data.ElfEdit qualified as Elf
 import Data.Generics.Labels ()
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
@@ -26,7 +23,7 @@ import Data.Version (Version (versionBranch))
 import Data.Word (Word64)
 import GHC.Generics (Generic)
 import Numeric (readHex)
-import Options.Applicative
+import Options.Applicative hiding (header)
 import Prettyprinter qualified as PP
 import Prettyprinter.Render.Text qualified as PP
 import System.Exit (exitFailure)
@@ -42,10 +39,8 @@ import Text.Printf (printf)
 import Data.Macaw.Analysis.RegisterUse qualified as Macaw
 import Data.Macaw.DebugLogging qualified as Macaw
 import Data.Macaw.Discovery qualified as Macaw
-import Data.Parameterized.Some (Some (Some))
 
 import Reopt
-import Reopt.ELFArchInfo (getElfArchInfo)
 import Reopt.EncodeInvariants (
   encodeInvariantFailedMsg,
   encodeInvariantMsg,
@@ -53,7 +48,7 @@ import Reopt.EncodeInvariants (
 import Reopt.Events (
   FunId (FunId),
   ReoptFunStep (AnnotationGeneration, InvariantInference),
-  ReoptGlobalStep (DiscoveryInitialization, Relinking),
+  ReoptGlobalStep (Relinking),
   ReoptLogEvent (ReoptFunStepFailed, ReoptFunStepFinished),
   joinLogEvents,
   printLogEvent,
@@ -76,7 +71,6 @@ import Reopt.Utils.Exit (
 import Reopt.VCG.Annotations as Ann (ModuleAnnotations (..))
 import Reopt.X86 (
   X86OS,
-  osArchitectureInfo,
   osLinkName,
   osPersonality,
  )
@@ -650,13 +644,13 @@ dumpDisassembly args elfPath = do
   unless (null l) $ do
     displayError "Recoverable errors occurred in reading elf file:"
     mapM_ (IO.hPrint IO.stderr) l
-  let sections = filter isCodeSection $ e ^.. elfSections
+  let sections = filter isCodeSection $ e ^.. ELF.elfSections
   when (null sections) $ do
     displayError "Binary contains no executable sections"
     exitFailure
   writeOutput (outputPath args) $ \h -> do
     forM_ sections $ \s -> do
-      printX86SectionDisassembly h (elfSectionName s) (elfSectionAddr s) (elfSectionData s)
+      printX86SectionDisassembly h (ELF.elfSectionName s) (ELF.elfSectionAddr s) (ELF.elfSectionData s)
 
 loadOptions :: Args -> LoadOptions
 loadOptions args = LoadOptions{loadOffset = loadBaseAddress args}
@@ -681,7 +675,7 @@ argsReoptOptions args = do
 showCFG :: Args -> FilePath -> IO String
 showCFG args elfPath = do
   reoptOpts <- argsReoptOptions args
-  Some hdrInfo <- do
+  hdrInfo <- do
     bs <- checkedReadFile elfPath
     case Elf.decodeElfHeaderInfo bs of
       Left (_, msg) -> do
@@ -689,21 +683,16 @@ showCFG args elfPath = do
         displayError $ "  " ++ msg
         exitFailure
       Right (Elf.SomeElf hdr) ->
-        pure $! Some hdr
-  let hdr = Elf.header hdrInfo
-  -- Get architecture specific information
-  marchInfo <- getElfArchInfo (Elf.headerClass hdr) (Elf.headerMachine hdr) (Elf.headerOSABI hdr)
-  (w, SomeArch ainfo pltFn) <- handleEitherStringWithExit marchInfo
-  mapM_ displayError w
+        case ELF.headerClass (ELF.header hdr) of
+          ELF.ELFCLASS32 -> do
+            displayError "Encountered 32-bit executable, reopt currently only supports X84-64"
+            exitFailure
+          ELF.ELFCLASS64 -> pure $! hdr
   mr <-
     runReoptM printLogEvent $ do
-      -- Resolve header annotations
       hdrAnn <- resolveHeader (headerPath args) (clangPath args)
-      -- Perform Discovery
-      globalStepStarted DiscoveryInitialization
-      initState <- reoptRunInit $ doInit (loadOptions args) hdrInfo ainfo pltFn reoptOpts
-      (_, discState) <- doDiscovery hdrAnn hdrInfo ainfo initState reoptOpts
-      -- Print discovery
+      (_, _, _, discState) <-
+        reoptPrepareForRecovery (loadOptions args) reoptOpts hdrAnn (unnamedFunPrefix args) hdrInfo
       pure $ show $ Macaw.ppDiscoveryStateBlocks discState
   handleEitherWithExit mr
 
@@ -724,13 +713,8 @@ showConstraints args elfPath = do
       funPrefix :: BSC.ByteString
       funPrefix = unnamedFunPrefix args
 
-    (os, initState) <- reoptX86Init (loadOptions args) rOpts origElf
-    let symAddrMap = initDiscSymAddrMap initState
-
-    checkSymbolUnused funPrefix symAddrMap
-
-    let ainfo = osArchitectureInfo os
-    (debugTypeMap, discState) <- doDiscovery hdrAnn origElf ainfo initState rOpts
+    (os, symAddrMap, debugTypeMap, discState) <-
+      reoptPrepareForRecovery (loadOptions args) rOpts hdrAnn funPrefix origElf
 
     let sysp = osPersonality os
     recoverX86Output <-
@@ -837,7 +821,7 @@ performReopt args elfPath = do
       reoptPrepareForRecovery (loadOptions args) rOpts hdrAnn funPrefix origElf
 
     when (shouldRecover args) $
-      checkSymbolUnused funPrefix symAddrMap
+      checkNoSymbolUsesReservedPrefix funPrefix symAddrMap
 
     case cfgExportPath args of
       Nothing -> pure ()

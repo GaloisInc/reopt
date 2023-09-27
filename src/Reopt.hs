@@ -31,7 +31,7 @@ module Reopt (
   printX86SectionDisassembly,
   doInit,
   reoptX86Init,
-  checkSymbolUnused,
+  checkNoSymbolUsesReservedPrefix,
   SomeArchitectureInfo (..),
 
   -- * Code discovery
@@ -2616,13 +2616,15 @@ reoptX86Init loadOpts reoptOpts hdrInfo = do
       doInit loadOpts hdrInfo ainfo pltFn reoptOpts
   pure (os, initState)
 
-checkSymbolUnused ::
+-- | Checks that the prefix we intend to use for unnamed functions is not used
+-- by any of the pre-existing symbols.
+checkNoSymbolUsesReservedPrefix ::
   -- | Prefix to use if we need to generate new function endpoints later.
   BSC.ByteString ->
   -- | Symbol map constructor for binary.
   SymAddrMap (Macaw.ArchAddrWidth arch) ->
   ReoptM arch r ()
-checkSymbolUnused unnamedFunPrefix symAddrMap = do
+checkNoSymbolUsesReservedPrefix unnamedFunPrefix symAddrMap = do
   when (isUsedPrefix unnamedFunPrefix symAddrMap) $ do
     reoptFatalError $
       Events.ReoptInitError $
@@ -2697,17 +2699,20 @@ reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap = go
       then traceM "NOLOOP" >> return (newDiscState, recoverX86Output, recMod, moduleConstraints)
       else traceM "LOOP" >> go newDiscState
 
+-- | Factors out some pre-computation we frequently do prior to running the
+-- Reopt recovery.
 reoptPrepareForRecovery ::
   LoadOptions ->
   ReoptOptions ->
   AnnDeclarations ->
+  -- | Prefix to use when encountering unnamed functions
   BSC.ByteString ->
   Elf.ElfHeaderInfo 64 ->
   ReoptM X86_64 r (X86OS, SymAddrMap 64, FunTypeMaps 64, Macaw.DiscoveryState X86_64)
-reoptPrepareForRecovery loadOpts reoptOpts hdrAnn unnamedFunPrefix hdrInfo = do
+reoptPrepareForRecovery loadOpts reoptOpts hdrAnn funPrefix hdrInfo = do
   (os, initState) <- reoptX86Init loadOpts reoptOpts hdrInfo
   let symAddrMap = initDiscSymAddrMap initState
-  checkSymbolUnused unnamedFunPrefix symAddrMap
+  checkNoSymbolUsesReservedPrefix funPrefix symAddrMap
   let ainfo = osArchitectureInfo os
   (debugTypeMap, discState) <- doDiscovery hdrAnn hdrInfo ainfo initState reoptOpts
   return (os, symAddrMap, debugTypeMap, discState)
