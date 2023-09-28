@@ -111,14 +111,8 @@ import Control.Monad.Except (
   Except,
   ExceptT,
   MonadError (throwError),
-  MonadIO (liftIO),
-  MonadTrans (lift),
-  forM,
-  forM_,
   runExcept,
   runExceptT,
-  unless,
-  when,
  )
 import Control.Monad.Reader (ReaderT (..))
 import Control.Monad.State (
@@ -191,7 +185,6 @@ import Data.Macaw.Memory.ElfLoader (
   memoryForElfSegments',
  )
 import Data.Macaw.Utils.IncComp (
-  ContT (..),
   IncCompM,
   incCompDone,
   incCompLog,
@@ -366,7 +359,17 @@ import Text.LLVM.PP qualified as LPP
 import Text.PrettyPrint.HughesPJ qualified as HPJ
 import Text.Printf (printf)
 
-import Control.Monad.Extra (concatForM, concatMapM)
+import Control.Monad.Cont (
+  ContT (..),
+  MonadIO (liftIO),
+  MonadTrans (lift),
+  forM,
+  forM_,
+  unless,
+  when,
+ )
+import Control.Monad.Extra qualified as M (concatForM, concatMapM, eitherM, maybeM, whenJustM)
+import Control.Monad.Trans.Cont (evalContT)
 import Data.Macaw.CFG qualified as Macaw
 import Debug.Trace
 import Reopt.ELFArchInfo (
@@ -1576,6 +1579,9 @@ findDebugDynDep opts depName = do
             (show e)
       )
 
+polymorphicCallCC :: ((forall b. a -> ContT r m b) -> ContT r m a) -> ContT r m a
+polymorphicCallCC f = ContT $ \k -> runContT (f $ \a -> ContT $ \_ -> k a) k
+
 -- | Add the debug information from dynamic dependencies (if available either in
 --   cached format or on disk for analysis).
 addDynDepDebugInfo ::
@@ -1590,55 +1596,65 @@ addDynDepDebugInfo rDisOpt m rawDepName = do
   when (roVerboseMode rDisOpt) $
     hPutStrLn stderr $
       "Searching for dynamic dependency " ++ depName ++ "'s debug info..."
-  findCachedDebugInfo depName >>= \case
-    Just (cacheFile, contents) -> do
-      case reads contents :: [(Map BS.ByteString ReoptFunType, String)] of
-        [] -> do
-          hPutStrLn stderr $ "Internal warning: " ++ cacheFile ++ " did not contain valid data."
-          pure m
-        ((m', _) : _) -> do
-          pure $ m <> m'
-    Nothing -> do
-      findDebugDynDep rDisOpt depName >>= \case
-        Nothing -> do
-          when (roVerboseMode rDisOpt) $
+  evalContT $ polymorphicCallCC $ \earlyReturn -> do
+    let andOnJustM computation = M.whenJustM (lift computation)
+    let butOnNothingM computation onNothing = M.maybeM onNothing pure (lift computation)
+    let butOnLeft e onLeft = M.eitherM onLeft pure (pure e)
+    let butOnLeftM computation onLeft = M.eitherM onLeft pure (lift computation)
+    -- Try cached debug info
+    findCachedDebugInfo depName
+      `andOnJustM` \(cacheFile, contents) -> do
+        case reads contents :: [(Map BS.ByteString ReoptFunType, String)] of
+          [] -> do
+            lift $ hPutStrLn stderr $ "Internal warning: " ++ cacheFile ++ " did not contain valid data."
+            earlyReturn m
+          ((m', _) : _) -> do
+            earlyReturn $ m <> m'
+    -- Search for debug info
+    (fPath, fContent) <-
+      findDebugDynDep rDisOpt depName `butOnNothingM` do
+        when (roVerboseMode rDisOpt) $
+          lift $
             hPutStrLn stderr $
               "No debug info for " ++ depName ++ " found."
-          pure m
-        Just (fPath, fContent) ->
-          case Elf.decodeElfHeaderInfo fContent of
-            Left (_, msg) -> do
-              hPutStrLn stderr $ "Error decoding elf header info in " ++ fPath ++ ":"
-              hPutStrLn stderr $ "  " ++ msg
-              pure m
-            Right (Elf.SomeElf hdrInfo) -> do
-              let hdr = Elf.header hdrInfo
-              -- Get architecture specific information (Either String ([String], SomeArchitectureInfo w))
-              getElfArchInfo (Elf.headerClass hdr) (Elf.headerMachine hdr) (Elf.headerOSABI hdr) >>= \case
-                Left errMsg -> do
-                  hPutStrLn stderr $ "Error decoding elf header info in " ++ fPath ++ ":"
-                  hPutStrLn stderr $ "  " ++ errMsg
-                  pure m
-                Right (warnings, SomeArch ainfo _pltFn) -> do
-                  unless (null warnings) $ do
-                    hPutStrLn stderr $ "Warnings while computing architecture specific info for " ++ fPath ++ ":"
-                    mapM_ (hPutStrLn stderr) warnings -- IO (Either Events.ReoptFatalError r) r = mFnMap
-                  runReoptM Events.printLogEvent (discoverFunDebugInfo hdrInfo ainfo) >>= \case
-                    Left err -> do
-                      hPutStrLn stderr $ "Error decoding elf header info in " ++ fPath ++ ":"
-                      hPutStrLn stderr $ "  " ++ show err
-                      pure m
-                    Right fnMaps -> do
-                      let addrTypeMapSz = Map.size $ addrTypeMap fnMaps
-                      let noreturnMapSz = Map.size $ noreturnMap fnMaps
-                      let fnMap = nameTypeMap fnMaps
-                      unless (addrTypeMapSz == 0) $ do
-                        hPutStrLn stderr $ "WARNING: " ++ show addrTypeMapSz ++ " functions in debug info ignored (addrTypeMap) in " ++ fPath ++ "."
-                      unless (noreturnMapSz == 0) $ do
-                        hPutStrLn stderr $ "WARNING: " ++ show noreturnMapSz ++ " functions in debug info ignored (noreturnMap) in " ++ fPath ++ "."
-                      cPath <- debugInfoCacheFilePath depName
-                      writeFile cPath (show fnMap)
-                      pure $ fnMap <> m
+        earlyReturn m
+    -- Attempt to decode ELF header info
+    Elf.SomeElf hdrInfo <-
+      Elf.decodeElfHeaderInfo fContent `butOnLeft` \(_, msg) -> do
+        lift $ do
+          hPutStrLn stderr $ "Error decoding elf header info in " ++ fPath ++ ":"
+          hPutStrLn stderr $ "  " ++ msg
+        earlyReturn m
+    let hdr = Elf.header hdrInfo
+    -- Get architecture specific information (Either String ([String], SomeArchitectureInfo w))
+    (warnings, SomeArch ainfo _pltFn) <-
+      getElfArchInfo (Elf.headerClass hdr) (Elf.headerMachine hdr) (Elf.headerOSABI hdr)
+        `butOnLeftM` \errMsg -> do
+          lift $ do
+            hPutStrLn stderr $ "Error decoding elf header info in " ++ fPath ++ ":"
+            hPutStrLn stderr $ "  " ++ errMsg
+          earlyReturn m
+    unless (null warnings) $ lift $ do
+      hPutStrLn stderr $ "Warnings while computing architecture specific info for " ++ fPath ++ ":"
+      mapM_ (hPutStrLn stderr) warnings -- IO (Either Events.ReoptFatalError r) r = mFnMap
+    fnMaps <-
+      runReoptM Events.printLogEvent (discoverFunDebugInfo hdrInfo ainfo)
+        `butOnLeftM` \err -> do
+          lift $ do
+            hPutStrLn stderr $ "Error decoding elf header info in " ++ fPath ++ ":"
+            hPutStrLn stderr $ "  " ++ show err
+          earlyReturn m
+    let addrTypeMapSz = Map.size $ addrTypeMap fnMaps
+    let noreturnMapSz = Map.size $ noreturnMap fnMaps
+    let fnMap = nameTypeMap fnMaps
+    lift $ do
+      unless (addrTypeMapSz == 0) $ do
+        hPutStrLn stderr $ "WARNING: " ++ show addrTypeMapSz ++ " functions in debug info ignored (addrTypeMap) in " ++ fPath ++ "."
+      unless (noreturnMapSz == 0) $ do
+        hPutStrLn stderr $ "WARNING: " ++ show noreturnMapSz ++ " functions in debug info ignored (noreturnMap) in " ++ fPath ++ "."
+      cPath <- debugInfoCacheFilePath depName
+      writeFile cPath (show fnMap)
+    return $ fnMap <> m
 
 -- | Get values of DT_NEEDED entries in an ELF file.
 parseDynamicNeeded ::
@@ -2642,7 +2658,7 @@ fnStmtHasCandidate ::
   FnStmt arch ->
   m [Macaw.ArchMemAddr arch]
 fnStmtHasCandidate (FnCall _fn args _mRet) = do
-  concatForM args $ \(Some fnValue) ->
+  M.concatForM args $ \(Some fnValue) ->
     case fnValue of
       FnCodePointer addr -> return [addr]
       _ -> return []
@@ -2685,7 +2701,7 @@ reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap = go
     -- Search for new candidate function entry points
     let allBlocks = concatMap fnBlocks (recoveredDefs recMod)
     let allStmts = concatMap fbStmts allBlocks
-    candidateAddresses <- concatMapM fnStmtHasCandidate allStmts
+    candidateAddresses <- M.concatMapM fnStmtHasCandidate allStmts
     let candidateAddressesAsSegOffs = mapMaybe (asSegmentOff (Macaw.memory discState)) candidateAddresses
     -- NOTE: if we mark addresses that have already been tried (even if they
     -- have failed), Macaw will not add them to the unexplored frontier, so
