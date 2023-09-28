@@ -53,12 +53,9 @@ module Reopt (
   -- * Function recovery
   Reopt.TypeInference.HeaderTypes.AnnDeclarations,
   Reopt.TypeInference.HeaderTypes.emptyAnnDeclarations,
-  IntendToRecover (IntendToRecover),
-  intendToRecover,
-  dontIntendToRecover,
   RecoveredModule,
   recoveredDefs,
-  reoptPrepareForRecovery,
+  reoptInitialDiscovery,
   reoptRecoveryLoop,
   resolveHeader,
   updateRecoveredModule,
@@ -1580,7 +1577,7 @@ findDebugDynDep opts depName = do
       )
 
 -- | Add the debug information from dynamic dependencies (if available either in
---   cached format or on disk for analysis).
+-- cached format or on disk for analysis).
 addDynDepDebugInfo ::
   ReoptOptions ->
   -- | Map to extend with debug info.
@@ -2348,7 +2345,7 @@ data RecoverX86Output = RecoverX86Output
   , summaryFailures :: Map (MemSegmentOff 64) (FunctionArgAnalysisFailure 64)
   }
 
--- | Analyze an elf binary to extract information.
+-- | Analyze an ELF binary to extract information.
 doRecoverX86 ::
   -- | Prefix to use if we need to generate new function endpoints later.
   BSC.ByteString ->
@@ -2654,13 +2651,15 @@ fnStmtHasCandidate (FnCall _fn args _mRet) = do
 fnStmtHasCandidate _ = return []
 
 -- | Repeatedly perform Macaw recovery and discover new potential function entry
--- points.
+-- points.  Incrementally re-runs discovery if new function entry points are
+-- identified.
 reoptRecoveryLoop ::
   SymAddrMap 64 ->
   ReoptOptions ->
   BSC.ByteString ->
   SyscallPersonality ->
   FunTypeMaps 64 ->
+  -- | Discovery state after the initial discovery run
   Macaw.DiscoveryState X86_64 ->
   ReoptM
     X86_64
@@ -2670,13 +2669,11 @@ reoptRecoveryLoop ::
     , RecoveredModule X86_64
     , ModuleConstraints X86_64
     )
-reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap = go
+reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap firstDiscState = do
+  checkNoSymbolUsesReservedPrefix funPrefix symAddrMap
+  go firstDiscState
  where
-  go previousDiscState = do
-    discState <-
-      reoptRunDiscovery (getAddrSymMap symAddrMap) $
-        Macaw.incCompleteDiscovery previousDiscState (roDiscoveryOptions rOpts)
-
+  go discState = do
     recoverX86Output <- doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState
     let recMod = recoveredModule recoverX86Output
 
@@ -2695,34 +2692,29 @@ reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap = go
     -- NOTE: if we mark addresses that have already been tried (even if they
     -- have failed), Macaw will not add them to the unexplored frontier, so
     -- there is no risk here.
-    let newDiscState = Macaw.markAddrsAsFunction Macaw.UserRequest candidateAddressesAsSegOffs discState
-    let unexplored = newDiscState ^. Macaw.unexploredFunctions
+    let markedDiscState = Macaw.markAddrsAsFunction Macaw.UserRequest candidateAddressesAsSegOffs discState
+    let unexplored = markedDiscState ^. Macaw.unexploredFunctions
 
     if null unexplored
-      then return (newDiscState, recoverX86Output, recMod, moduleConstraints)
-      else go newDiscState
+      then return (markedDiscState, recoverX86Output, recMod, moduleConstraints)
+      else do
+        newDiscState <-
+          reoptRunDiscovery (getAddrSymMap symAddrMap) $
+            Macaw.incCompleteDiscovery markedDiscState (roDiscoveryOptions rOpts)
+        go newDiscState
 
-newtype IntendToRecover = IntendToRecover {getIntendToRecover :: Bool}
-intendToRecover, dontIntendToRecover :: IntendToRecover
-intendToRecover = IntendToRecover True
-dontIntendToRecover = IntendToRecover False
-
--- | Factors out some pre-computation we frequently do prior to running the
--- Reopt recovery.
-reoptPrepareForRecovery ::
+-- | Performs the first instance of Macaw discovery, before any recovery has
+-- happened.  This may yield less code than what a full recovery would, due to
+-- the discovery loop in `reoptRecoveryLoop`.
+reoptInitialDiscovery ::
   LoadOptions ->
   ReoptOptions ->
   AnnDeclarations ->
-  -- | Prefix to use when encountering unnamed functions
-  BSC.ByteString ->
   Elf.ElfHeaderInfo 64 ->
-  -- | Whether we should perform checks relative to recovery
-  IntendToRecover ->
   ReoptM X86_64 r (X86OS, SymAddrMap 64, FunTypeMaps 64, Macaw.DiscoveryState X86_64)
-reoptPrepareForRecovery loadOpts reoptOpts hdrAnn funPrefix hdrInfo recIntent = do
+reoptInitialDiscovery loadOpts reoptOpts hdrAnn hdrInfo = do
   (os, initState) <- reoptX86Init loadOpts reoptOpts hdrInfo
   let symAddrMap = initDiscSymAddrMap initState
-  when (getIntendToRecover recIntent) $ checkNoSymbolUsesReservedPrefix funPrefix symAddrMap
   let ainfo = osArchitectureInfo os
   (debugTypeMap, discState) <- doDiscovery hdrAnn hdrInfo ainfo initState reoptOpts
   return (os, symAddrMap, debugTypeMap, discState)
@@ -2748,7 +2740,7 @@ recoverX86Elf ::
     )
 recoverX86Elf loadOpts reoptOpts hdrAnn unnamedFunPrefix hdrInfo = do
   (os, symAddrMap, debugTypeMap, discState) <-
-    reoptPrepareForRecovery loadOpts reoptOpts hdrAnn unnamedFunPrefix hdrInfo intendToRecover
+    reoptInitialDiscovery loadOpts reoptOpts hdrAnn hdrInfo
   let sysp = osPersonality os
   (finalDiscState, recoverX86Output, recMod, moduleConstraints) <-
     reoptRecoveryLoop symAddrMap reoptOpts unnamedFunPrefix sysp debugTypeMap discState
