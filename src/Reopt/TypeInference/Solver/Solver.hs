@@ -399,7 +399,7 @@ solveEqRowC eqc = traceContext' "solveEqRowC" eqc $ do
 -- Type unification
 
 solveEqC :: EqC -> SolverM (Maybe TyVar)
-solveEqC eqc = do
+solveEqC eqc = traceContext' "solveEqC" eqc $ do
   (lv, m_lty) <- lookupTyVar (eqLhs eqc)
   (m_rv, m_rty) <- case eqRhs eqc of
     VarTy tv -> first Just <$> lookupTyVar tv

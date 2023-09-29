@@ -58,6 +58,7 @@ import Data.Parameterized (FoldableF, FoldableFC)
 import Data.Parameterized.NatRepr (NatRepr, intValue, testEquality, widthVal)
 import Data.Parameterized.Some (Some (Some), viewSome)
 import Data.Parameterized.TraversableFC (toListFC)
+import Debug.Trace (traceM)
 import Reopt.CFG.FnRep (
   FnArchConstraints,
   FnArchStmt,
@@ -98,7 +99,8 @@ import Reopt.TypeInference.Solver (
   subTypeTC,
   tupleTy,
   unifyConstraints,
-  varTy, vecTy,
+  varTy,
+  vecTy,
  )
 import Reopt.TypeInference.Solver qualified as S
 import Reopt.TypeInference.Solver.Constraints (
@@ -385,6 +387,8 @@ phisForBlock blockAddr =
     . Map.lookup blockAddr
     <$> askContext (cgenFunctionContext . cgenBlockPhiTypes)
 
+-- | Returns the type variables created that stand for the arguments types and
+-- return type of the function at the given address, if possible.
 functionTypeTyVars ::
   forall arch.
   FnValue arch (BVType (ArchAddrWidth arch)) ->
@@ -399,11 +403,10 @@ functionTypeTyVars saddr = do
   case saddr of
     FnConstantValue _ v -> do
       -- c.f. RegisterUse.x86CallRegs
-      let faddr =
-            addrWidthClass aWidth $
-              absoluteAddr (fromInteger v)
-      -- FIXME
-      pure (flip Map.lookup ftypes =<< asSegmentOff mem faddr)
+      let faddr = addrWidthClass aWidth $ absoluteAddr (fromInteger v)
+      pure $ do -- Maybe
+        off <- asSegmentOff mem faddr
+        Map.lookup off ftypes
     FnFunctionEntryValue _ fn -> pure (Map.lookup fn namedftypes)
     _ -> pure Nothing
 
@@ -525,7 +528,9 @@ genFnValue v =
     FnReturn frv -> funRetType frv
     FnFunctionEntryValue{} -> punt
     FnArg i _ -> argumentType i
-    FnCodePointer _addr -> pure $ Ty UnknownFunPtrTy
+    FnCodePointer _addr -> do
+      ret <- varTy <$> freshTyVar (show (PP.pretty v))
+      pure $ Ty $ PreFunPtrTy [] ret
     -- NOTE: not sure what to do about varags yet
     FnTypedCodePointer _addr fty ->
       pure $
@@ -537,8 +542,8 @@ genFnValue v =
     warn "Punting on FnValue"
     varTy <$> freshTyVar (show (PP.pretty v))
 
--- | Generate constraints for an App.  The first argument is the
--- output (result) type.
+-- | Generate constraints for an App.  The first argument is the output (result)
+-- type.
 genApp ::
   FnArchConstraints arch =>
   (Ty, Int) ->
@@ -810,6 +815,7 @@ genCall ::
   Maybe (Some FnReturnVar) ->
   CGenM CGenBlockContext arch ()
 genCall fn args m_ret = do
+  traceM $ "genCall: " <> show fn
   m_ftyp <- functionTypeTyVars fn
 
   case m_ftyp of
@@ -822,6 +828,7 @@ genCall fn args m_ret = do
             ++ ")"
         )
     Just ftyp -> do
+      traceM $ "Found type: " <> show ftyp
       -- Arguments
       zipWithM_ go args (fttvArgs ftyp)
 

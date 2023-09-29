@@ -79,6 +79,7 @@ finalizeTypeDefs = do
         then pure (PtrTy (rowExprVar re'))
         else PtrTy <$> freshRowVarFM (dropFieldMap off fm)
     UnknownFunPtrTy -> pure UnknownFunPtrTy
+    PreFunPtrTy args ret -> FunPtrTy <$> mapM lookupTyVarRep args <*> lookupTyVarRep ret
     FunPtrTy args ret -> FunPtrTy <$> mapM lookupTyVarRep args <*> lookupTyVarRep ret
     NumTy n -> pure (NumTy n)
     ConflictTy n -> pure (ConflictTy n)
@@ -152,6 +153,7 @@ finaliseTyF (ty, tv, _) r =
   norm = \case
     PtrTy rv -> FTy (PtrTy (Map.findWithDefault (StructTy emptyFieldMap) rv (csRowVars r)))
     UnknownFunPtrTy -> FTy UnknownFunPtrTy
+    PreFunPtrTy args ret -> FTy (FunPtrTy (map normTy args) (normTy ret))
     FunPtrTy args ret -> FTy (FunPtrTy (map normTy args) (normTy ret))
     NumTy n -> FTy (NumTy n)
     ConflictTy n -> FTy (ConflictTy n)

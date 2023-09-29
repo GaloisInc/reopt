@@ -240,7 +240,7 @@ import Reopt.CFG.FnRep (
   FnArchStmt,
   FnBlock (fbStmts),
   FnStmt (FnCall),
-  FnValue (FnCodePointer, FnFunctionEntryValue),
+  FnValue (FnCodePointer, FnFunctionEntryValue, FnTypedCodePointer),
   FoldFnValue (foldFnValue),
   Function (fnAddr, fnName),
   FunctionDecl (
@@ -369,7 +369,7 @@ import Text.Printf (printf)
 
 import Control.Monad.Extra (concatForM, concatMapM)
 import Data.Macaw.CFG qualified as Macaw
-import Debug.Trace
+import Debug.Trace (trace, traceM)
 import Reopt.ELFArchInfo (
   InitDiscM,
   ProcessPLTEntries,
@@ -379,7 +379,7 @@ import Reopt.ELFArchInfo (
   warnABIUntested,
  )
 import Reopt.TypeInference.ConstraintGen (
-  ModuleConstraints,
+  ModuleConstraints (..),
   genModuleConstraints,
  )
 import Reopt.X86 (
@@ -390,7 +390,7 @@ import Reopt.X86 (
  )
 
 copyrightNotice :: String
-copyrightNotice = "Copyright 2014-21 Galois, Inc."
+copyrightNotice = "Copyright 2014-23 Galois, Inc."
 
 -- usageMessage :: String
 -- usageMessage = "For help on using reopt, run \"reopt --help\"."
@@ -2622,6 +2622,7 @@ fnStmtHasCandidate (FnCall _fn args _mRet) = do
   concatForM args $ \(Some fnValue) ->
     case fnValue of
       FnCodePointer addr -> return [addr]
+      FnTypedCodePointer _addr _ -> error "This should not happen the first time?"
       _ -> return []
 fnStmtHasCandidate _ = return []
 
@@ -2646,13 +2647,9 @@ reoptRecoveryLoop ::
     )
 reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap firstDiscState = do
   checkNoSymbolUsesReservedPrefix funPrefix symAddrMap
-  go firstDiscState
+  go Map.empty firstDiscState
  where
-  go discState = do
-
-    -- TODO: compute this map (maybe incrementally?)
-    let funPtrTys = Map.empty
-
+  go funPtrTys discState = do
     recoverX86Output <- doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState funPtrTys
 
     let recMod = recoveredModule recoverX86Output
@@ -2663,6 +2660,20 @@ reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap firstDiscState = 
             (Macaw.memory discState)
             (roTraceUnification rOpts)
             (roTraceConstraintOrigins rOpts)
+
+    traceM "\nmcFunTypes:"
+    forM_ (Map.assocs (mcFunTypes moduleConstraints)) $ \a -> do
+      traceM $ show a
+
+    traceM "\nmcTypeMap:"
+    forM_ (Map.assocs (mcTypeMap moduleConstraints)) $ \a -> do
+      traceM $ show $ PP.pretty a
+
+    traceM "\nmcAssignTyVars:"
+    forM_ (Map.assocs (mcAssignTyVars moduleConstraints)) $ \a -> do
+      traceM $ show a
+
+    traceM "?"
 
     -- Search for new candidate function entry points
     let allBlocks = concatMap fnBlocks (recoveredDefs recMod)
@@ -2681,7 +2692,7 @@ reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap firstDiscState = 
         newDiscState <-
           reoptRunDiscovery (getAddrSymMap symAddrMap) $
             Macaw.incCompleteDiscovery markedDiscState (roDiscoveryOptions rOpts)
-        go newDiscState
+        go funPtrTys newDiscState
 
 -- | Performs the first instance of Macaw discovery, before any recovery has
 -- happened.  This may yield less code than what a full recovery would, due to

@@ -554,10 +554,9 @@ recoverCValue cv = do
       | Just addrRef <- asSegmentOff mem addr
       , Perm.isExecutable (segmentFlags (segoffSegment addrRef)) -> do
           funPtrTys <- frcFunctionPointerTypes <$> getFunCtx
-          case Map.lookup addr funPtrTys of
-            Nothing -> pure $ FnCodePointer addr
-            Just fty -> pure _
-      -- throwErrorAt ReoptUnsupportedFnValueTag "Cannot lift code pointers."
+          return $ case Map.lookup addr funPtrTys of
+            Nothing -> FnCodePointer addr
+            Just fty -> FnTypedCodePointer addr fty
       | otherwise ->
           case asAbsoluteAddr addr of
             Just absAddr -> emitNewAssign (toInteger absAddr)
