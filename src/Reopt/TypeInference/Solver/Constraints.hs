@@ -37,14 +37,19 @@ prettySExp docs = PP.group $ PP.encloseSep "(" ")" " " docs
 -- output relatively compact. Use 'ppEqCWithProv' if you want to include
 -- 'eqProv'.
 instance PP.Pretty EqC where
-  pretty (EqC l r _prov) = prettySExp [PP.pretty l, "=", PP.pretty r]
+  pretty = ppEqCWithoutProv
+  -- pretty = ppEqCWithProv
+
+-- | Pretty-print an 'EqC', omitting its provenance.
+ppEqCWithoutProv :: EqC -> PP.Doc ann
+ppEqCWithoutProv (EqC l r _) = prettySExp [PP.pretty l, "=", PP.pretty r]
 
 -- | Pretty-print an 'EqC', including its provenance.
 ppEqCWithProv :: EqC -> PP.Doc ann
 ppEqCWithProv eqC =
   PP.align $
     PP.vsep
-      [ PP.pretty eqC
+      [ ppEqCWithoutProv eqC
       , PP.hang 2 $ "Provenance: " <> PP.pretty (eqProv eqC)
       ]
 
