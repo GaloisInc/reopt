@@ -14,7 +14,7 @@ module Reopt.TypeInference.ConstraintGen (
 
 import Control.Lens ((<>=), (?=), (^?))
 import Control.Lens qualified as L
-import Control.Monad (join, mapAndUnzipM, zipWithM_)
+import Control.Monad (join, mapAndUnzipM, zipWithM_, forM_)
 import Control.Monad.Reader qualified as Reader
 import Control.Monad.State.Strict (MonadState, StateT, evalStateT)
 import Control.Monad.Trans (lift)
@@ -892,9 +892,19 @@ freshFunctionTypeTyVars ::
   FunctionType arch ->
   CGenM ctx arch FunctionTypeTyVars
 freshFunctionTypeTyVars fn ft = do
+
+  -- Create fresh type variables for all arguments types and the return type
   let fnStr = BSC.unpack fn
   args <- for (zip (fnArgTypes ft) [(0 :: Int) ..]) (\(_, i) -> freshTyVar (fnStr <> ".arg" <> show i))
   ret <- traverse (const (freshTyVar (fnStr <> ".ret"))) (fnReturnType ft)
+
+  -- Immediately add constraints that resolve those type variables to their type
+  forM_ (zip args (fnArgTypes ft)) $ \ (tyVar, typ) ->
+    emitEq DeclaredTypeProv (varTy tyVar) $ macawTypeToReoptTy typ
+  case (ret, fnReturnType ft) of
+    (Just retTyVar, Just retTy) -> emitEq DeclaredTypeProv (varTy retTyVar) $ macawTypeToReoptTy retTy
+    _ -> pure ()
+
   pure (FunctionTypeTyVars args ret)
 
 -- | While initially we were creating one type variable per argument/return, we

@@ -182,6 +182,7 @@ data ConstraintProvenance where
   -- | A generic origin to use for constraints arising in test suites.
   TestingProv ::
     ConstraintProvenance
+  DeclaredTypeProv :: ConstraintProvenance
 
 instance PP.Pretty ConstraintProvenance where
   pretty (FnRepProv prov) = "FnRep:" PP.<+> PP.pretty prov
@@ -193,6 +194,7 @@ instance PP.Pretty ConstraintProvenance where
   pretty FromSubRowCProv = "FromSubRowCProv"
   pretty FromSubTypeCProv = "FromSubTypeCProv"
   pretty TestingProv = "TestingProv"
+  pretty DeclaredTypeProv = "DeclaredTypeProv"
 
 instance Show ConstraintProvenance where
   show = show . PP.pretty
