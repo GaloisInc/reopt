@@ -1,1 +1,5 @@
 gcc -fno-asynchronous-unwind-tables ./function_pointer.c -o function_pointer_unstripped && cp ./function_pointer_unstripped ./function_pointer_stripped && strip ./function_pointer_stripped
+
+and
+
+cabal run reopt:exe:reopt -- --lib-dir ./deps/reopt-benchmark-binaries/centos7-dev/lib64 --debug-dir ./deps/reopt-benchmark-binaries/centos7-dev/debug-lib64 --export-llvm ./scratch/out.ll ./scratch/coreutils-bin-stripped/bin/true
