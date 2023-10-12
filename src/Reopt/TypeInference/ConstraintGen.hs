@@ -58,7 +58,6 @@ import Data.Parameterized (FoldableF, FoldableFC)
 import Data.Parameterized.NatRepr (NatRepr, intValue, testEquality, widthVal)
 import Data.Parameterized.Some (Some (Some), viewSome)
 import Data.Parameterized.TraversableFC (toListFC)
-import Debug.Trace (traceM)
 import Reopt.CFG.FnRep (
   FnArchConstraints,
   FnArchStmt,
@@ -815,7 +814,7 @@ genCall ::
   Maybe (Some FnReturnVar) ->
   CGenM CGenBlockContext arch ()
 genCall fn args m_ret = do
-  traceM $ "genCall: " <> show fn
+  -- traceM $ "genCall: " <> show fn
   m_ftyp <- functionTypeTyVars fn
 
   case m_ftyp of
@@ -828,7 +827,7 @@ genCall fn args m_ret = do
             ++ ")"
         )
     Just ftyp -> do
-      traceM $ "Found type: " <> show ftyp
+      -- traceM $ "Found type: " <> show ftyp
       -- Arguments
       zipWithM_ go args (fttvArgs ftyp)
 

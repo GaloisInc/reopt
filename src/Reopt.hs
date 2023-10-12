@@ -369,7 +369,7 @@ import Text.Printf (printf)
 
 import Control.Monad.Extra (concatForM, concatMapM)
 import Data.Macaw.CFG qualified as Macaw
-import Debug.Trace (trace, traceM)
+import Debug.Trace (trace)
 import Reopt.ELFArchInfo (
   InitDiscM,
   ProcessPLTEntries,
@@ -2661,19 +2661,19 @@ reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap firstDiscState = 
             (roTraceUnification rOpts)
             (roTraceConstraintOrigins rOpts)
 
-    traceM "\nmcFunTypes:"
-    forM_ (Map.assocs (mcFunTypes moduleConstraints)) $ \a -> do
-      traceM $ show a
+    -- traceM "\nmcFunTypes:"
+    -- forM_ (Map.assocs (mcFunTypes moduleConstraints)) $ \a -> do
+    --   traceM $ show a
 
-    traceM "\nmcTypeMap:"
-    forM_ (Map.assocs (mcTypeMap moduleConstraints)) $ \a -> do
-      traceM $ show $ PP.pretty a
+    -- traceM "\nmcTypeMap:"
+    -- forM_ (Map.assocs (mcTypeMap moduleConstraints)) $ \a -> do
+    --   traceM $ show $ PP.pretty a
 
-    traceM "\nmcAssignTyVars:"
-    forM_ (Map.assocs (mcAssignTyVars moduleConstraints)) $ \a -> do
-      traceM $ show a
+    -- traceM "\nmcAssignTyVars:"
+    -- forM_ (Map.assocs (mcAssignTyVars moduleConstraints)) $ \a -> do
+    --   traceM $ show a
 
-    traceM "?"
+    -- traceM "?"
 
     -- Search for new candidate function entry points
     let allBlocks = concatMap fnBlocks (recoveredDefs recMod)

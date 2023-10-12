@@ -135,13 +135,18 @@ instance PP.Pretty ITy where
     VarTy v -> PP.pretty v
     ITy ty -> PP.pretty ty
 
+-- | Prints `args` as "arg1, arg2, ..."
+ppArgList :: PP.Pretty a => [a] -> PP.Doc ann
+ppArgList args =
+  PP.hcat (PP.punctuate (PP.comma <> PP.space) (map PP.pretty args))
+
 instance (PP.Pretty f, PP.Pretty rv) => PP.Pretty (TyF rv f) where
   pretty = \case
     NumTy sz -> "i" <> PP.pretty sz
     PtrTy t -> "ptr " <> PP.pretty t
     UnknownFunPtrTy -> "? (???)*"
-    PreFunPtrTy args ret -> PP.pretty ret <> " (" <> PP.hcat (PP.punctuate PP.comma (map PP.pretty args)) <> ", ...?)*"
-    FunPtrTy args ret -> PP.pretty ret <> " (" <> PP.hcat (PP.punctuate PP.comma (map PP.pretty args)) <> ")*"
+    PreFunPtrTy args ret -> PP.pretty ret <> " (" <> ppArgList args <> ", ...?)*"
+    FunPtrTy args ret -> PP.pretty ret <> " (" <> ppArgList args <> ")*"
     ConflictTy n -> "![" <> PP.pretty n <> "]"
     TupleTy ts -> PP.tupled (map PP.pretty ts)
     VecTy n ty -> "< " <> PP.pretty n <> " x " <> PP.pretty ty <> " >"
