@@ -1,0 +1,1 @@
+gcc -fno-asynchronous-unwind-tables ./function_pointer.c -o function_pointer_unstripped && cp ./function_pointer_unstripped ./function_pointer_stripped && strip ./function_pointer_stripped
