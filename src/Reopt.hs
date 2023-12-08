@@ -2397,16 +2397,6 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
     let resolveFunName a = Map.lookup a funNameMap
     x86ArgumentAnalysis sysp resolveFunName knownFunTypeMap discState
 
-  -- let explored =
-  --       [ nm
-  --       | Some finfo <- Macaw.exploredFunctions discState
-  --       , let faddr = Macaw.discoveredFunAddr finfo
-  --       , let nm = Map.findWithDefault (error "Address undefined in funNameMap") faddr funNameMap
-  --       ]
-
-  -- trace "Functions explored by Macaw:" $ forM_ explored $ \ nm ->
-  --   trace (" → " <> show nm) (pure ())
-
   let
     funTypeMap :: Map BS.ByteString (MemSegmentOff 64, X86FunTypeInfo)
     funTypeMap =
@@ -2419,25 +2409,8 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
           , tp <- maybeToList $ Map.lookup faddr fDems
           ]
 
-  -- trace "fDems:" $ forM_ (Map.assocs fDems) $ \ (k, v) ->
-  --   trace (show k <> " ↦ " <> show v) (pure ())
-  -- trace "Candidates were:" (pure ())
-  -- forM_
-  --         [ (faddr, nm)
-  --         | Some finfo <- Macaw.exploredFunctions discState
-  --         , let faddr = Macaw.discoveredFunAddr finfo
-  --         , let nm = Map.findWithDefault (error "Address undefined in funNameMap") faddr funNameMap
-  --         -- , tp <- maybeToList $ Map.lookup faddr fDems
-  --         ] $ \ (a, nm) ->
-  --           trace (show a <> " ↦ " <> show nm) (pure ())
-
-  -- trace "Actual fun type map:" $
-  --   forM_ (Map.assocs funTypeMap) $ \ kv -> do
-  --     trace (show kv) (pure ())
-
   fnDefsAndLogEvents <- fmap catMaybes $
     forM (Macaw.exploredFunctions discState) $ \(Some finfo) -> do
-      --  trace ("Considering recovering " <> show (Macaw.discoveredFunAddr finfo)) $ do
       let faddr = Macaw.discoveredFunAddr finfo
       let _ = trace ("2: " <> show faddr) ()
       let dnm = Macaw.discoveredFunSymbol finfo
