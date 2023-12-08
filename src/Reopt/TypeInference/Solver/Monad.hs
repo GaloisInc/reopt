@@ -262,9 +262,9 @@ defineTyVar tyv ty = #ctxTyVars %= UM.insert tyv ty
 undefineTyVar :: TyVar -> SolverM ()
 undefineTyVar ty = #ctxTyVars %= UM.delete ty
 
--- | @unsafeUnifyTyVars root leaf@ will make @root@ the new equiv. rep
--- for @leaf@.  Note that both root and leaf should be the reps. of
--- their corresponding equivalence classes.
+-- | @unsafeUnifyTyVars root leaf@ will make @root@ the new equiv. rep for
+-- @leaf@.  Note that both @root@ and @leaf@ should be the reps. of their
+-- corresponding equivalence classes.
 unsafeUnifyTyVars :: TyVar -> TyVar -> SolverM ()
 unsafeUnifyTyVars root leaf = #ctxTyVars %= UM.unify root leaf
 

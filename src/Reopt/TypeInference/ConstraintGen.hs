@@ -385,6 +385,8 @@ phisForBlock blockAddr =
     . Map.lookup blockAddr
     <$> askContext (cgenFunctionContext . cgenBlockPhiTypes)
 
+-- | Returns the type variables created that stand for the arguments types and
+-- return type of the function at the given address, if possible.
 functionTypeTyVars ::
   forall arch.
   FnValue arch (BVType (ArchAddrWidth arch)) ->
@@ -537,8 +539,8 @@ genFnValue v =
     warn "Punting on FnValue"
     varTy <$> freshTyVar (show (PP.pretty v))
 
--- | Generate constraints for an App.  The first argument is the
--- output (result) type.
+-- | Generate constraints for an App.  The first argument is the output (result)
+-- type.
 genApp ::
   FnArchConstraints arch =>
   (Ty, Int) ->

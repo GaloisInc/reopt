@@ -1421,6 +1421,15 @@ getPtrWidth =
 getPtrWidth' :: BBLLVM arch Int
 getPtrWidth' = widthVal <$> getPtrWidth
 
+-- | @coerceForSubtype mty1 mty2 v@ takes a value `v` with some potential actual
+-- type `mty1` and some potential expected type `mty2` in some context, and
+-- tries to create a value with the appropriate expected type, if possible.  For
+-- instance, we may have been able to figure out that something is a pointer in
+-- some context, but passed it to a context where things got conflicted, so that
+-- we must present it as a numeric type instead.
+-- Another example is values that have been understood as function pointers, but
+-- whose arity was not deducible in some context.  This may be alleviated with
+-- better constraint generation.
 coerceForSubtype ::
   Maybe FTy ->
   Maybe FTy ->
