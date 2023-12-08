@@ -104,7 +104,7 @@ library
     Reopt.TypeInference.Pretty
     Reopt.TypeInference.Solver
     Reopt.TypeInference.Solver.Constraints
-    Reopt.TypeInference.Solver.Finalise
+    Reopt.TypeInference.Solver.Finalize
     Reopt.TypeInference.Solver.Monad
     Reopt.TypeInference.Solver.RowVariables
     Reopt.TypeInference.Solver.Solver

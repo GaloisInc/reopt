@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Reopt.TypeInference.Solver.Finalise (
+module Reopt.TypeInference.Solver.Finalize (
   finalizeTypeDefs,
   ConstraintSolution (..),
 ) where
