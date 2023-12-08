@@ -401,30 +401,40 @@ solveEqRowC eqc = traceContext' "solveEqRowC" eqc $ do
 solveEqC :: EqC -> SolverM (Maybe TyVar)
 solveEqC eqc = do
   (lv, m_lty) <- lookupTyVar (eqLhs eqc)
+  -- NOTE: `m_rv` will be `Just` if there is a type variable standing for the
+  -- RHS, `None` otherwise.
   (m_rv, m_rty) <- case eqRhs eqc of
     VarTy tv -> first Just <$> lookupTyVar tv
     ITy ty -> pure (Nothing, Just ty)
   case (m_lty, m_rty) of
-    -- trivial up to eqv.
     _
+      -- When the RHS is the same tyvar as the LHS, nothing to do
       | m_rv == Just lv -> pure Nothing
       -- We have eqc == (lhs = SomeTy ...) and lhs ~> ConflictTy ...,
       -- so there is nothing further to do.
       | isNothing m_rv
       , Just ConflictTy{} <- m_lty ->
           pure Nothing
+    -- When the RHS is a tyvar with no definition, it can be represented by the
+    -- LHS tyvar.
     (_, Nothing) -> traverse_ (unsafeUnifyTyVars lv) m_rv $> Nothing
+    -- When the LHS has no definition, and the RHS has one
     (Nothing, Just rty)
+      -- If the RHS has a tyvar, use it as the repr. for LHS
       | Just rv <- m_rv -> unsafeUnifyTyVars rv lv $> Nothing
-      -- the RHS was a term, so we define lv.
+      -- If the RHS has no tyvar, it's just a term, so we can define the LHS
+      -- tyvar to be the RHS term
       | otherwise -> defineTyVar lv rty $> Nothing
+    -- When both LHS and RHS have definitions
     (Just ty1, Just ty2) -> do
+      -- Arbitrarily, pick LHS to represent both
       traverse_ (unsafeUnifyTyVars lv) m_rv
       traverse_ undefineTyVar m_rv
       unifyTypes lv ty1 ty2
 
--- | @unifyTypes tv1 t1 t2@ unifies the types @t1@ and @t2@
--- named by the type variable @tv@.
+-- | @unifyTypes tv1 t1 t2@ unifies the types `t1` and `t2` named by the type
+-- variable `tv`.  Returns `Nothing` when unification succeeded, and @Just tv@
+-- when the type variable is conflicted.
 unifyTypes :: TyVar -> ITy' -> ITy' -> SolverM (Maybe TyVar)
 unifyTypes tv ty1 ty2 =
   case (ty1, ty2) of
