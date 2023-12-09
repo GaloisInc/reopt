@@ -36,7 +36,7 @@ import Reopt.TypeInference.Solver.Constraints (
   SubTypeC,
   pattern (:<:),
  )
-import Reopt.TypeInference.Solver.Finalise (
+import Reopt.TypeInference.Solver.Finalize (
   ConstraintSolution,
   finalizeTypeDefs,
  )

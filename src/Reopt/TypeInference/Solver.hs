@@ -49,7 +49,7 @@ import Reopt.TypeInference.Solver.Constraints (
   EqRowC (..),
   OperandClass (..),
  )
-import Reopt.TypeInference.Solver.Finalise (ConstraintSolution (..))
+import Reopt.TypeInference.Solver.Finalize (ConstraintSolution (..))
 import Reopt.TypeInference.Solver.Monad (
   Conditional (..),
   Conjunction (Conjunction),
