@@ -29,14 +29,18 @@ module Reopt.TypeInference.Solver (
   tyToLLVMType,
   -- FTy stuff
   FTy,
-  pattern FNumTy,
-  pattern FPtrTy,
+  pattern FConflictTy,
   pattern FFunPtrTy,
+  pattern FNamedStruct,
+  pattern FNumTy,
+  pattern FPreFunPtrTy,
+  pattern FPtrTy,
+  pattern FStructTy,
+  pattern FTupleTy,
   pattern FUnknownFunPtrTy,
   pattern FUnknownTy,
-  pattern FNamedStruct,
-  pattern FStructTy,
-  pattern FConflictTy,
+  pattern FVecTy,
+  pattern FVoidTy,
   -- Testing
 ) where
 
@@ -387,26 +391,27 @@ maybeGlobalTC ty rowv off = do
 --------------------------------------------------------------------------------
 -- LLVM support (FTy patterns)
 
-pattern FNumTy :: Int -> FTy
-pattern FNumTy sz = FTy (NumTy sz)
-
-pattern FPtrTy :: FTy -> FTy
-pattern FPtrTy ty = FTy (PtrTy ty)
-
-pattern FFunPtrTy :: [FTy] -> FTy -> FTy
-pattern FFunPtrTy args ret = FTy (FunPtrTy args ret)
-
-pattern FUnknownFunPtrTy :: FTy
-pattern FUnknownFunPtrTy = FTy UnknownFunPtrTy
-
-pattern FUnknownTy :: FTy
-pattern FUnknownTy = UnknownTy
-
-pattern FStructTy :: FieldMap FTy -> FTy
-pattern FStructTy fm = StructTy fm
-
-pattern FNamedStruct :: StructName -> FTy
-pattern FNamedStruct s = NamedStruct s
-
 pattern FConflictTy :: Int -> FTy
 pattern FConflictTy n = FTy (ConflictTy n)
+pattern FFunPtrTy :: [FTy] -> FTy -> FTy
+pattern FFunPtrTy args ret = FTy (FunPtrTy args ret)
+pattern FNamedStruct :: StructName -> FTy
+pattern FNamedStruct s = NamedStruct s
+pattern FNumTy :: Int -> FTy
+pattern FNumTy sz = FTy (NumTy sz)
+pattern FPreFunPtrTy :: [FTy] -> FTy -> FTy
+pattern FPreFunPtrTy args ret = FTy (PreFunPtrTy args ret)
+pattern FPtrTy :: FTy -> FTy
+pattern FPtrTy ty = FTy (PtrTy ty)
+pattern FStructTy :: FieldMap FTy -> FTy
+pattern FStructTy fm = StructTy fm
+pattern FTupleTy :: [FTy] -> FTy
+pattern FTupleTy tys = FTy (TupleTy tys)
+pattern FUnknownFunPtrTy :: FTy
+pattern FUnknownFunPtrTy = FTy UnknownFunPtrTy
+pattern FUnknownTy :: FTy
+pattern FUnknownTy = UnknownTy
+pattern FVecTy :: Int -> FTy -> FTy
+pattern FVecTy a b = FTy (VecTy a b)
+pattern FVoidTy :: FTy
+pattern FVoidTy = FTy VoidTy
