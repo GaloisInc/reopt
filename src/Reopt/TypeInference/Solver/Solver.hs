@@ -16,7 +16,7 @@ import Control.Lens (
  )
 import Control.Monad (when, zipWithM_)
 import Control.Monad.Extra (orM)
-import Control.Monad.State (MonadState (get), StateT, evalStateT, put)
+import Control.Monad.State (MonadState (get), StateT, evalStateT, gets, put)
 import Data.Bifunctor (Bifunctor (second), first)
 import Data.Foldable (traverse_)
 import Data.Functor (($>))
@@ -436,7 +436,8 @@ solveEqC eqc = do
 -- variable `tv`.  Returns `Nothing` when unification succeeded, and @Just tv@
 -- when the type variable is conflicted.
 unifyTypes :: TyVar -> ITy' -> ITy' -> SolverM (Maybe TyVar)
-unifyTypes tv ty1 ty2 =
+unifyTypes tv ty1 ty2 = do
+  pW <- gets ptrWidth
   case (ty1, ty2) of
     _ | ty1 == ty2 -> pure Nothing
     (NumTy i, NumTy i')
@@ -458,6 +459,18 @@ unifyTypes tv ty1 ty2 =
     -- Should always have n1 == n2
     (VecTy n1 ty1', VecTy n2 ty2')
       | n1 == n2 -> addTyVarEq' (UnificationProv ty1' ty2') ty1' ty2' $> Nothing
+    -- LHS definition was more precise, do nothing
+    (NumTy n, AddrWidthBVTy) | n == pW -> pure Nothing
+    -- RHS definition was more precise, overwrite LHS definition
+    (AddrWidthBVTy, NumTy n) | n == pW -> defineTyVar tv (NumTy n) >> pure Nothing
+    -- LHS definition was more precise, do nothing
+    (PtrTy _, AddrWidthBVTy) -> pure Nothing
+    -- RHS definition was more precise, overwrite LHS definition
+    (AddrWidthBVTy, PtrTy _) -> defineTyVar tv ty2 >> pure Nothing
+    -- LHS definition was more precise, do nothing
+    (PreFunPtrTy{}, AddrWidthBVTy) -> pure Nothing
+    -- RHS definition was more precise, overwrite LHS definition
+    (AddrWidthBVTy, PreFunPtrTy{}) -> defineTyVar tv ty2 >> pure Nothing
     -- Unification failure, including the case where one is a
     -- conflictty (but not both), we need to report a conflict.
     _ ->
