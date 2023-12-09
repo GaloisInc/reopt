@@ -128,11 +128,14 @@ compileTy (Ty ty) =
       PtrTy fm -> do
         fm' <- traverse nameTy fm
         PtrTy . RowExprVar <$> freshRowVarFM fm'
-      UnknownFunPtrTy -> pure UnknownFunPtrTy
+      AddrWidthBVTy -> pure AddrWidthBVTy
+      UnknownFunPtrTy -> PreFunPtrTy [] <$> freshTyVar Nothing Nothing
+      PreFunPtrTy args ret -> PreFunPtrTy <$> mapM nameTy args <*> nameTy ret
       FunPtrTy args ret -> FunPtrTy <$> mapM nameTy args <*> nameTy ret
       ConflictTy n -> pure (ConflictTy n)
       TupleTy ts -> TupleTy <$> traverse nameTy ts
       VecTy n ty' -> VecTy n <$> nameTy ty'
+      VoidTy -> pure VoidTy
 
 --------------------------------------------------------------------------------
 -- Constraint constructors
