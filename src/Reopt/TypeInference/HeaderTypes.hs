@@ -86,7 +86,7 @@ instance PP.Pretty AnnFunType where
       [ PP.pretty (funRet fty)
       , PP.space
       , "("
-      , PP.hcat (PP.punctuate PP.comma (map PP.pretty (V.toList (funArgs fty))))
+      , PP.hcat (PP.punctuate (PP.comma <> PP.space) (map PP.pretty (V.toList (funArgs fty))))
       , ")"
       ]
 
