@@ -24,6 +24,9 @@ data TyF rvar f
     NumTy Int
   | -- | A pointer to a value.
     PtrTy rvar
+  | -- | A bitvector type the width of addresses for the current architecture,
+    -- not yet proven to be either numeric or pointer.
+    AddrWidthBVTy
   | -- | A type which is used differently in different contexts
     ConflictTy Int
   | -- | A n-ary tuple
@@ -32,8 +35,11 @@ data TyF rvar f
     VecTy Int f
   | -- | An unknown function pointer type
     UnknownFunPtrTy
+  | -- | Function pointer type we're in the process of figuring out the arity of
+    PreFunPtrTy [f] f
   | -- | A known function pointer type
     FunPtrTy [f] f
+  | VoidTy
   deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
 
 -- | An unrolled ITy
@@ -83,11 +89,14 @@ tyByteWidth ptrSz (FTy ty) =
   case ty of
     NumTy n -> fromIntegral n `div` 8
     PtrTy _ -> fromIntegral ptrSz `div` 8
+    AddrWidthBVTy -> fromIntegral ptrSz `div` 8
     UnknownFunPtrTy -> fromIntegral ptrSz `div` 8
+    PreFunPtrTy{} -> fromIntegral ptrSz `div` 8
     FunPtrTy{} -> fromIntegral ptrSz `div` 8
     ConflictTy n -> fromIntegral n `div` 8
     TupleTy{} -> error "Saw a TupleTy in tyByteWidth"
     VecTy{} -> error "Saw a VecTy in tyByteWidth"
+    VoidTy -> error "Saw VoidTy in tyByteWidth"
 
 recTyToLLVMType :: Int -> [(Offset, FTy)] -> L.Type
 -- This breaks recursive types.
@@ -114,11 +123,17 @@ tyToLLVMType ptrSz = go
     case ty of
       NumTy n -> L.PrimType (L.Integer (fromIntegral n))
       PtrTy ty' -> L.PtrTo $ tyToLLVMType ptrSz ty'
+      -- If we havent' collected evidence it's a pointer, we just output it as a
+      -- numeric
+      AddrWidthBVTy -> L.PrimType (L.Integer (fromIntegral ptrSz))
       UnknownFunPtrTy -> L.PtrTo L.Opaque
+      -- (val) Maybe this should be solved already and an error here?
+      PreFunPtrTy args ret -> L.PtrTo $ L.FunTy (go ret) (map go args) False
       FunPtrTy args ret -> L.PtrTo $ L.FunTy (go ret) (map go args) False
       ConflictTy n -> L.PrimType (L.Integer (fromIntegral n))
       TupleTy ts -> L.Struct (map go ts)
       VecTy n ty' -> L.Vector (fromIntegral n) (go ty')
+      VoidTy -> L.voidT
 
 --------------------------------------------------------------------------------
 -- Instances
@@ -130,15 +145,23 @@ instance PP.Pretty ITy where
     VarTy v -> PP.pretty v
     ITy ty -> PP.pretty ty
 
+-- | Prints `args` as "arg1, arg2, ..."
+ppArgList :: PP.Pretty a => [a] -> PP.Doc ann
+ppArgList args =
+  PP.hcat (PP.punctuate (PP.comma <> PP.space) (map PP.pretty args))
+
 instance (PP.Pretty f, PP.Pretty rv) => PP.Pretty (TyF rv f) where
   pretty = \case
     NumTy sz -> "i" <> PP.pretty sz
     PtrTy t -> "ptr " <> PP.pretty t
+    AddrWidthBVTy -> "bv|ptr"
     UnknownFunPtrTy -> "? (???)*"
-    FunPtrTy args ret -> PP.pretty ret <> " (" <> PP.hcat (PP.punctuate PP.comma (map PP.pretty args)) <> ")*"
+    PreFunPtrTy args ret -> PP.pretty ret <> " (" <> ppArgList args <> ", ...?)*"
+    FunPtrTy args ret -> PP.pretty ret <> " (" <> ppArgList args <> ")*"
     ConflictTy n -> "![" <> PP.pretty n <> "]"
     TupleTy ts -> PP.tupled (map PP.pretty ts)
     VecTy n ty -> "< " <> PP.pretty n <> " x " <> PP.pretty ty <> " >"
+    VoidTy -> "void"
 
 instance PP.Pretty FTy where
   pretty = \case
@@ -162,11 +185,14 @@ instance (FreeTyVars rvar, FreeTyVars f) => FreeTyVars (TyF rvar f) where
   freeTyVars = \case
     NumTy _ -> Set.empty
     PtrTy t -> freeTyVars t
+    AddrWidthBVTy -> Set.empty
     UnknownFunPtrTy -> Set.empty
+    PreFunPtrTy args ret -> freeTyVars ret `Set.union` Set.unions (map freeTyVars args)
     FunPtrTy args ret -> freeTyVars ret `Set.union` Set.unions (map freeTyVars args)
     ConflictTy{} -> Set.empty
     TupleTy ts -> foldMap freeTyVars ts
     VecTy _ ty -> freeTyVars ty
+    VoidTy -> Set.empty
 
 instance FreeTyVars ITy where
   freeTyVars = \case
@@ -195,11 +221,14 @@ instance (FreeRowVars r, FreeRowVars f) => FreeRowVars (TyF r f) where
   freeRowVars = \case
     NumTy _ -> Set.empty
     PtrTy t -> freeRowVars t
+    AddrWidthBVTy -> Set.empty
     UnknownFunPtrTy -> Set.empty
+    PreFunPtrTy args ret -> freeRowVars ret `Set.union` Set.unions (map freeRowVars args)
     FunPtrTy args ret -> freeRowVars ret `Set.union` Set.unions (map freeRowVars args)
     ConflictTy{} -> Set.empty
     TupleTy ts -> foldMap freeRowVars ts
     VecTy _ ty -> freeRowVars ty
+    VoidTy -> Set.empty
 
 instance FreeRowVars TyVar where
   freeRowVars _ = Set.empty

@@ -546,7 +546,7 @@ recoverCValue cv = do
     RelocatableCValue _w addr
       | Just addrRef <- asSegmentOff mem addr
       , Perm.isExecutable (segmentFlags (segoffSegment addrRef)) -> do
-        pure $ FnCodePointer addr
+        pure $ FnCodePointer addrRef
           -- throwErrorAt ReoptUnsupportedFnValueTag "Cannot lift code pointers."
       | otherwise ->
           case asAbsoluteAddr addr of

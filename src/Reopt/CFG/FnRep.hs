@@ -63,6 +63,7 @@ import Data.Macaw.CFG (
   ArchBlockPrecond,
   ArchFn,
   ArchReg,
+  ArchSegmentOff,
   IsArchFn (..),
   IsArchStmt (..),
   MemRepr (..),
@@ -239,7 +240,7 @@ data FnValue (arch :: Type) (tp :: M.Type) where
   FnArg :: !Int -> !(TypeRepr tp) -> FnValue arch tp
   -- | Value is a constant pointer into the executable segment
   FnCodePointer ::
-    Macaw.MemAddr (ArchAddrWidth arch) ->
+    ArchSegmentOff arch ->
     FnValue arch (BVType (ArchAddrWidth arch))
   -- | Value is a constant pointer into the executable segment for which we have
   -- identified the function type through type inference

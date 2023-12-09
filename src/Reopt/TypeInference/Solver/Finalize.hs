@@ -78,12 +78,15 @@ finalizeTypeDefs = do
       if off == 0
         then pure (PtrTy (rowExprVar re'))
         else PtrTy <$> freshRowVarFM (dropFieldMap off fm)
+    AddrWidthBVTy -> pure AddrWidthBVTy
     UnknownFunPtrTy -> pure UnknownFunPtrTy
+    PreFunPtrTy args ret -> PreFunPtrTy <$> mapM lookupTyVarRep args <*> lookupTyVarRep ret
     FunPtrTy args ret -> FunPtrTy <$> mapM lookupTyVarRep args <*> lookupTyVarRep ret
     NumTy n -> pure (NumTy n)
     ConflictTy n -> pure (ConflictTy n)
     TupleTy ts -> TupleTy <$> traverse lookupTyVarRep ts
     VecTy n ty -> VecTy n <$> lookupTyVarRep ty
+    VoidTy -> pure VoidTy
 
   normFieldMap :: FieldMap TyVar -> SolverM (FieldMap TyVar)
   normFieldMap = traverse lookupTyVarRep
@@ -151,12 +154,15 @@ finaliseTyF (ty, tv, _) r =
  where
   norm = \case
     PtrTy rv -> FTy (PtrTy (Map.findWithDefault (StructTy emptyFieldMap) rv (csRowVars r)))
+    AddrWidthBVTy -> FTy AddrWidthBVTy
     UnknownFunPtrTy -> FTy UnknownFunPtrTy
+    PreFunPtrTy args ret -> FTy (PreFunPtrTy (map normTy args) (normTy ret))
     FunPtrTy args ret -> FTy (FunPtrTy (map normTy args) (normTy ret))
     NumTy n -> FTy (NumTy n)
     ConflictTy n -> FTy (ConflictTy n)
     TupleTy ts -> FTy (TupleTy (map normTy ts))
     VecTy n t -> FTy (VecTy n (normTy t))
+    VoidTy -> FTy VoidTy
   normTy t = Map.findWithDefault UnknownTy t (csTyVars r)
 
 finaliseFieldMap ::
