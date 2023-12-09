@@ -120,6 +120,7 @@ import Control.Monad.Except (
   unless,
   when,
  )
+import Control.Monad.Extra (concatMapM)
 import Control.Monad.Reader (ReaderT (..))
 import Control.Monad.State (
   State,
@@ -150,6 +151,7 @@ import Data.Macaw.Analysis.FunctionArgs (
   DemandSet (functionResultDemands, registerDemands),
   FunctionArgAnalysisFailure (..),
   RegisterSet,
+  ResolveCallArgsFn,
   functionDemands,
  )
 import Data.Macaw.Analysis.RegisterUse (
@@ -159,7 +161,6 @@ import Data.Macaw.Analysis.RegisterUse (
 import Data.Macaw.CFG (
   ArchConstraints,
   ArchFn,
-  ArchReg,
   ArchSegmentOff,
   FoldableFC,
   MemAddr (..),
@@ -168,10 +169,7 @@ import Data.Macaw.CFG (
   MemWidth,
   MemWord (..),
   Memory (memAddrWidth),
-  RegAddrWidth,
-  RegState,
   RegionIndex,
-  Value,
   VersionedSymbol (versymName),
   addrWidthClass,
   asSegmentOff,
@@ -181,6 +179,7 @@ import Data.Macaw.CFG (
   resolveRegionOff,
   segoffAddr,
  )
+import Data.Macaw.CFG qualified as Macaw
 import Data.Macaw.Discovery qualified as Macaw
 import Data.Macaw.Memory.ElfLoader (
   LoadOptions (..),
@@ -222,6 +221,7 @@ import Data.Maybe (
  )
 import Data.Parameterized.Some (Some (..))
 import Data.Parameterized.TraversableF (FoldableF)
+import Data.Proxy (Proxy (Proxy))
 import Data.Set qualified as Set
 import Data.String (IsString (..))
 import Data.Vector qualified as V
@@ -237,6 +237,7 @@ import Reopt.ArgResolver (
   runArgResolver,
  )
 import Reopt.CFG.FnRep (
+  FnArchConstraints,
   FnArchStmt,
   FnBlock (fbStmts),
   FnStmt (FnCall),
@@ -265,9 +266,11 @@ import Reopt.CFG.FunctionCheck (
 import Reopt.CFG.LLVM (
   LLVMGenOptions (..),
   moduleForFunctions,
+  runGetInferredType,
  )
 import Reopt.CFG.LLVM.X86 as LLVM (x86LLVMArchOps)
 import Reopt.CFG.Recovery (
+  FunctionPointerTypes,
   LLVMLogEvent (..),
   RecoveredFunction (llvmLogEvents, recoveredFunction),
   X86ArgInfo (ArgBV64, ArgZMM),
@@ -366,9 +369,6 @@ import Text.LLVM.PP qualified as LPP
 import Text.PrettyPrint.HughesPJ qualified as HPJ
 import Text.Printf (printf)
 
-import Control.Monad.Extra (concatForM, concatMapM)
-import Data.Macaw.CFG qualified as Macaw
-import Debug.Trace
 import Reopt.ELFArchInfo (
   InitDiscM,
   ProcessPLTEntries,
@@ -378,8 +378,14 @@ import Reopt.ELFArchInfo (
   warnABIUntested,
  )
 import Reopt.TypeInference.ConstraintGen (
-  ModuleConstraints,
+  ModuleConstraints (..),
   genModuleConstraints,
+ )
+import Reopt.TypeInference.Solver (
+  FTy,
+  pattern FFunPtrTy,
+  pattern FPreFunPtrTy,
+  pattern FUnknownFunPtrTy,
  )
 import Reopt.X86 (
   X86OS (..),
@@ -1423,12 +1429,13 @@ findCachedDebugInfo depName = do
 -- | Return the debug information regarding functions in the given elf file.
 discoverFunDebugInfo ::
   forall arch r.
+  MemWidth (Macaw.ArchAddrWidth arch) =>
   Elf.ElfHeaderInfo (Macaw.ArchAddrWidth arch) ->
   ArchitectureInfo arch ->
   ReoptM
     arch
     r
-    (FunTypeMaps (RegAddrWidth (ArchReg arch)))
+    (FunTypeMaps (Macaw.ArchAddrWidth arch))
 discoverFunDebugInfo hdrInfo ainfo = X86.withArchConstraints ainfo $ do
   let resolveFn _symName _off = Nothing
   reoptIncComp $
@@ -1725,11 +1732,6 @@ headerTypeMap ::
   Map (ArchSegmentOff arch) Macaw.NoReturnFunStatus ->
   ReoptM arch r (FunTypeMaps (Macaw.ArchAddrWidth arch))
 headerTypeMap hdrAnn dynDepsTypeMap symAddrMap noretMap = do
-  -- trace "typeDefs" $ forM_ (Map.assocs (typeDefs hdrAnn)) $ \ (bs, ty) ->
-  --   trace (show bs <> " ↦ " <> show ty) (pure ())
-  -- trace "funDecls" $ forM_ (Map.assocs (funDecls hdrAnn)) $ \ (bs, ty) ->
-  --   trace (show bs <> " ↦ " <> show ty) (pure ())
-
   globalStepStarted Events.HeaderTypeInference
 
   let voidPtrType = PtrAnnType VoidAnnType
@@ -2271,6 +2273,16 @@ matchPLT finfo
       Just sym
 matchPLT _ = Nothing
 
+reoptResolveCallArgsFn ::
+  Memory 64 ->
+  (MemSegmentOff 64 -> Maybe BSC.ByteString) ->
+  (BSC.ByteString -> Maybe X86FunTypeInfo) ->
+  ResolveCallArgsFn X86_64
+reoptResolveCallArgsFn mem resolveFunName resolveFunType callSite callRegs = do
+  case x86CallRegs mem resolveFunName resolveFunType callSite callRegs of
+    Left rsn -> Left (ppRegisterUseErrorReason rsn)
+    Right r -> Right (callArgValues r)
+
 -- | Infer arguments for functions that we do not already know.  Returns a pair
 -- of the successful arguments on the left, and the analysis failures on the
 -- right.
@@ -2303,20 +2315,12 @@ x86ArgumentAnalysis sysp resolveFunName funTypeMap discState = do
   globalStepStarted Events.FunctionArgInference
 
   let (dems, summaryFails) = do
-        let
-          resolveFn ::
-            MemSegmentOff 64 ->
-            RegState X86Reg (Value X86_64 ids) ->
-            Either String [Some (Value X86_64 ids)]
-          resolveFn callSite callRegs = do
-            -- trace ("[!!!] Resolving " <> show callSite <> ", regs: " <> show callRegs) $
-            -- trace ("FunMap:\n" <> show funTypeMap) $
-            case x86CallRegs mem resolveFunName resolveFunType callSite callRegs of
-              Left rsn -> Left (ppRegisterUseErrorReason rsn)
-              Right r -> Right (callArgValues r)
-        functionDemands (x86DemandInfo sysp) mem resolveFn $
-          filter shouldPropagate $
-            Macaw.exploredFunctions discState
+        functionDemands
+          (x86DemandInfo sysp)
+          mem
+          (reoptResolveCallArgsFn mem resolveFunName resolveFunType)
+          $ filter shouldPropagate
+          $ Macaw.exploredFunctions discState
 
   forM_ (Map.toList summaryFails) $ \(faddr, rsn) -> do
     case rsn of
@@ -2329,12 +2333,6 @@ x86ArgumentAnalysis sysp resolveFunName funTypeMap discState = do
         globalStepWarning Events.FunctionArgInference $
           printf "%s: Could not determine signature at callsite %s:\n    %s" (Events.ppFnEntry dnm faddr) (Events.ppSegOff callSite) msg
   globalStepFinished Events.FunctionArgInference ()
-
-  -- traceM "Demand set: "
-  -- forM_ (Map.assocs dems) $ \(off, dem) ->
-  --   traceM (show off <> " ↦ " <> show dem)
-  -- let fty = inferFunctionTypeFromDemands dems
-  -- traceM $ "Inferred function type: " <> show fty
 
   pure (inferFunctionTypeFromDemands dems, summaryFails)
 
@@ -2353,12 +2351,9 @@ doRecoverX86 ::
   SymAddrMap 64 ->
   FunTypeMaps 64 ->
   Macaw.DiscoveryState X86_64 ->
+  FunctionPointerTypes X86_64 ->
   ReoptM X86_64 r RecoverX86Output
-doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
-  -- trace "Potential fun type map:" $
-  --   forM_ (Map.assocs (addrTypeMap debugTypeMap)) $ \ (k, v) -> do
-  --     trace (show k <> " ↦ " <> show v) (pure ())
-
+doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys = do
   -- Map names to known function types when we have explicit information.
   let
     knownFunTypeMap :: Map BS.ByteString (MemSegmentOff 64, X86FunTypeInfo)
@@ -2392,6 +2387,10 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
                   Nothing -> nosymFunctionName unnamedFunPrefix addr
           ]
 
+  -- COMMENT OUT TO INSPECT CODE AS OBTAINED FROM MACAW
+  -- let explFuns = Macaw.exploredFunctions discState
+  -- error $ show $ viewSome PP.pretty <$> explFuns
+
   -- Infer registers each function demands.
   (fDems, summaryFailures) <- do
     let resolveFunName a = Map.lookup a funNameMap
@@ -2412,7 +2411,6 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
   fnDefsAndLogEvents <- fmap catMaybes $
     forM (Macaw.exploredFunctions discState) $ \(Some finfo) -> do
       let faddr = Macaw.discoveredFunAddr finfo
-      let _ = trace ("2: " <> show faddr) ()
       let dnm = Macaw.discoveredFunSymbol finfo
       let fnId = Events.funId faddr dnm
       let nm = Map.findWithDefault (error "Address undefined in funNameMap") faddr funNameMap
@@ -2447,7 +2445,7 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
                   funStepFinished Events.InvariantInference fnId invMap
                   -- Do function recovery
                   funStepStarted Events.Recovery fnId
-                  case recoverFunction sysp mem finfo invMap nm argRegs retRegs of
+                  case recoverFunction sysp mem finfo invMap nm argRegs retRegs funPtrTys of
                     Left e -> do
                       funStepFailed Events.Recovery fnId e
                       abandonBecause $ "recovery failed: " <> show (Events.recoverErrorMessage e)
@@ -2612,16 +2610,35 @@ checkNoSymbolUsesReservedPrefix unnamedFunPrefix symAddrMap = do
 -- However, we could double-check with the results of type reconstruction to
 -- potentially avoid some spurious pointers.
 fnStmtHasCandidate ::
-  MemWidth (Macaw.ArchAddrWidth arch) =>
-  Monad m =>
+  forall arch r.
+  FnArchConstraints arch =>
+  -- | Most recent module constraints
+  ModuleConstraints arch ->
+  -- | Which function the statement is part of
+  Function arch ->
+  -- | Statement to inspect for candidates (currently just looking at indirect calls)
   FnStmt arch ->
-  m [Macaw.ArchSegmentOff arch]
-fnStmtHasCandidate (FnCall _fn args _mRet) = do
-  concatForM args $ \(Some fnValue) ->
-    case fnValue of
-      FnCodePointer addr -> return [addr]
-      _ -> return []
-fnStmtHasCandidate _ = return []
+  ReoptM arch r [Macaw.ArchSegmentOff arch]
+fnStmtHasCandidate modConstraints fun (FnCall fn args _mRet) = do
+  let ty = runGetInferredType (fnName fun) modConstraints (Proxy @arch) fn
+  let
+    keepIfPromising :: (Some (FnValue arch), FTy) -> ReoptM arch r [Macaw.ArchSegmentOff arch]
+    keepIfPromising (Some (FnCodePointer addr), FFunPtrTy{}) = return [addr]
+    keepIfPromising (Some (FnCodePointer addr), FPreFunPtrTy{}) = return [addr]
+    keepIfPromising (Some (FnCodePointer addr), FUnknownFunPtrTy{}) = return [addr]
+    keepIfPromising pair = do
+      globalStepInfo Events.DebugTypeInference -- FIXME: may need new global steps
+        ("Not keeping " <> show pair <> " as promising") -- only while debugging
+      return []
+  case ty of
+    Just (FFunPtrTy argsTy _retTy) ->
+      if length args /= length argsTy
+        then error "Arity mismatch, investigate"
+        else concat <$> traverse keepIfPromising (zip args argsTy)
+        -- else (concat <$>) <$> traverse keepIfPromising $ zip args argsTy
+    Just (FPreFunPtrTy _argsTy _retTy) -> error "Check if this ever happens"
+    _ -> return []
+fnStmtHasCandidate _ _ _ = return []
 
 -- | Repeatedly perform Macaw recovery and discover new potential function entry
 -- points.  Incrementally re-runs discovery if new function entry points are
@@ -2644,10 +2661,11 @@ reoptRecoveryLoop ::
     )
 reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap firstDiscState = do
   checkNoSymbolUsesReservedPrefix funPrefix symAddrMap
-  go firstDiscState
+  go Map.empty firstDiscState
  where
-  go discState = do
-    recoverX86Output <- doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState
+  go funPtrTys discState = do
+    recoverX86Output <- doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState funPtrTys
+
     let recMod = recoveredModule recoverX86Output
 
     let moduleConstraints =
@@ -2658,9 +2676,11 @@ reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap firstDiscState = 
             (roTraceConstraintOrigins rOpts)
 
     -- Search for new candidate function entry points
-    let allBlocks = concatMap fnBlocks (recoveredDefs recMod)
-    let allStmts = concatMap fbStmts allBlocks
-    candidateAddresses <- concatMapM fnStmtHasCandidate allStmts
+    let perFunctionBlocks f = (f,) <$> fnBlocks f
+    let allBlocks = concatMap perFunctionBlocks (recoveredDefs recMod)
+    let perFunctionStmts (f, b) = (f,) <$> fbStmts b
+    let allStmts = concatMap perFunctionStmts allBlocks
+    candidateAddresses <- concatMapM (uncurry (fnStmtHasCandidate moduleConstraints)) allStmts
     -- NOTE: if we mark addresses that have already been tried (even if they
     -- have failed), Macaw will not add them to the unexplored frontier, so
     -- there is no risk here.
@@ -2673,7 +2693,7 @@ reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap firstDiscState = 
         newDiscState <-
           reoptRunDiscovery (getAddrSymMap symAddrMap) $
             Macaw.incCompleteDiscovery markedDiscState (roDiscoveryOptions rOpts)
-        go newDiscState
+        go funPtrTys newDiscState
 
 -- | Performs the first instance of Macaw discovery, before any recovery has
 -- happened.  This may yield less code than what a full recovery would, due to
@@ -2843,36 +2863,3 @@ renderLLVMIR llvmGenOpt llvmConfig os recMod constraints =
 updateRecoveredModule ::
   forall arch. ModuleConstraints arch -> RecoveredModule arch -> RecoveredModule arch
 updateRecoveredModule _ rm = rm
-
---   { recoveredDecls = updateFunctionDecl <$> recoveredDecls rm
---   , recoveredDefs = updateFunction <$> recoveredDefs rm
---   }
--- where
-
---   updateFunctionDecl :: FunctionDecl arch -> FunctionDecl arch
---   updateFunctionDecl fd =
---     let funType = mcFunTypes constraints Map.! funDeclAddr fd in
---     trace "Updating a FunctionDecl" $
---     fd { funDeclType = updateFunctionType funType (funDeclType fd)
---        }
-
---   updateFunctionType :: FunType arch -> FunctionType arch -> FunctionType arch
---   updateFunctionType fty f =
---     f { fnArgTypes = updateFnArgType <$> zip (fnArgTypes f) (funTypeArgs fty)
---       }
-
---   updateFnArgType :: (Some TypeRepr, TyVar) -> Some TypeRepr
---   updateFnArgType (ty, tyv) =
---     let found = mcTypeMap constraints Map.! tyv in
---     trace (show tyv) $
---     trace (show found) $
---       case found of
---         TopTy -> ty
---         PtrTy _ _ -> ty
---         _ -> ty
-
---   updateFunction :: Function arch -> Function arch
---   updateFunction f =
---     let funType = mcFunTypes constraints Map.! fnAddr f in
---     f { fnType = updateFunctionType funType (fnType f)
---       }

@@ -8,13 +8,16 @@ module Reopt.TypeInference.ConstraintGen (
   Ty,
   FTy,
   ModuleConstraints (..),
+  asFullyResolvedFunctionType,
   genModuleConstraints,
+  macawTypeToReoptTy,
+  resolveFunctionType,
   showInferredTypes,
 ) where
 
 import Control.Lens ((<>=), (?=), (^?))
 import Control.Lens qualified as L
-import Control.Monad (join, mapAndUnzipM, zipWithM_, forM_)
+import Control.Monad (forM_, join, mapAndUnzipM, zipWithM_)
 import Control.Monad.Reader qualified as Reader
 import Control.Monad.State.Strict (MonadState, StateT, evalStateT)
 import Control.Monad.Trans (lift)
@@ -34,6 +37,7 @@ import Data.Macaw.CFG (
   ArchAddrWidth,
   ArchFn,
   ArchSegmentOff,
+  MemWidth (addrWidthRepr),
  )
 import Data.Macaw.Memory (
   MemSegment,
@@ -41,6 +45,7 @@ import Data.Macaw.Memory (
   Memory,
   absoluteAddr,
   addrWidthClass,
+  addrWidthNatRepr,
   asSegmentOff,
   memAddrWidth,
   memSegments,
@@ -58,6 +63,7 @@ import Data.Parameterized (FoldableF, FoldableFC)
 import Data.Parameterized.NatRepr (NatRepr, intValue, testEquality, widthVal)
 import Data.Parameterized.Some (Some (Some), viewSome)
 import Data.Parameterized.TraversableFC (toListFC)
+import Data.Proxy (Proxy (Proxy))
 import Reopt.CFG.FnRep (
   FnArchConstraints,
   FnArchStmt,
@@ -98,7 +104,10 @@ import Reopt.TypeInference.Solver (
   subTypeTC,
   tupleTy,
   unifyConstraints,
-  varTy, vecTy,
+  varTy,
+  vecTy,
+  pattern FFunPtrTy,
+  pattern FVoidTy,
  )
 import Reopt.TypeInference.Solver qualified as S
 import Reopt.TypeInference.Solver.Constraints (
@@ -236,7 +245,7 @@ runCGenM ::
   Bool ->
   CGenM CGenGlobalContext arch a ->
   a
-runCGenM mem trace orig (CGenM m) = runSolverM trace orig ptrWidth $ do
+runCGenM mem traceWanted orig (CGenM m) = runSolverM traceWanted orig ptrWidth $ do
   let segs = memSegments mem
   -- Allocate a row variable for each memory segment
   memRows <- Map.fromList <$> mapM (\seg -> (,) seg <$> S.freshRowVar) segs
@@ -401,11 +410,11 @@ functionTypeTyVars saddr = do
   case saddr of
     FnConstantValue _ v -> do
       -- c.f. RegisterUse.x86CallRegs
-      let faddr =
-            addrWidthClass aWidth $
-              absoluteAddr (fromInteger v)
-      -- FIXME
-      pure (flip Map.lookup ftypes =<< asSegmentOff mem faddr)
+      let faddr = addrWidthClass aWidth $ absoluteAddr (fromInteger v)
+      pure $ do
+        -- Maybe
+        off <- asSegmentOff mem faddr
+        Map.lookup off ftypes
     FnFunctionEntryValue _ fn -> pure (Map.lookup fn namedftypes)
     _ -> pure Nothing
 
@@ -487,9 +496,9 @@ emitNumTy ::
 emitNumTy prov sz t =
   inSolverM (eqTC prov t (numTy sz))
 
--- pointerWidth :: forall arch. FnArchConstraints arch => Proxy arch -> Int
--- pointerWidth Proxy =
---   widthVal (addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch))))
+pointerWidth :: forall arch. FnArchConstraints arch => Proxy arch -> Int
+pointerWidth Proxy =
+  widthVal (addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch))))
 
 emitPtr ::
   ConstraintProvenance ->
@@ -506,17 +515,27 @@ emitPtr prov pointee pointer =
 -- -----------------------------------------------------------------------------
 -- Core algorithm
 
-macawTypeToReoptTy :: Some TypeRepr -> Ty
-macawTypeToReoptTy = viewSome go
+-- | Returns a `Ty` corresponding to the declared Macaw type if we believe the
+-- type can be fully trusted.  However, specifically for bitvector types of the
+-- architecture address size, we must be careful in that they could be numeric
+-- or pointers.
+macawTypeToReoptTy :: FnArchConstraints arch => Proxy arch -> Some TypeRepr -> Ty
+macawTypeToReoptTy pxy = viewSome go
  where
   go :: TypeRepr ty -> Ty
   go BoolTypeRepr = numTy 1
-  go (BVTypeRepr n) = numTy (fromInteger (intValue n))
+  go (BVTypeRepr n)
+    | widthVal n == pointerWidth pxy = Ty AddrWidthBVTy
+    | otherwise = numTy (fromInteger (intValue n))
   go (FloatTypeRepr _flt) = error "TODO: support float in type inference"
   go (TupleTypeRepr s) = tupleTy $ toListFC go s
   go (VecTypeRepr w tp) = vecTy (fromInteger (intValue w)) (go tp)
 
-genFnValue :: FnArchConstraints arch => FnValue arch tp -> CGenM CGenBlockContext arch Ty
+genFnValue ::
+  forall arch tp.
+  FnArchConstraints arch =>
+  FnValue arch tp ->
+  CGenM CGenBlockContext arch Ty
 genFnValue v =
   case v of
     FnUndefined{} -> punt
@@ -527,13 +546,16 @@ genFnValue v =
     FnReturn frv -> funRetType frv
     FnFunctionEntryValue{} -> punt
     FnArg i _ -> argumentType i
-    FnCodePointer _addr -> pure $ Ty UnknownFunPtrTy
+    FnCodePointer _addr -> do
+      ret <- varTy <$> freshTyVar (show (PP.pretty v))
+      pure $ Ty $ PreFunPtrTy [] ret
     -- NOTE: not sure what to do about varags yet
     FnTypedCodePointer _addr fty ->
-      pure $
-        funPtrTy
-          (map macawTypeToReoptTy (fnArgTypes fty))
-          (maybe (error "No return type, investigate...") macawTypeToReoptTy (fnReturnType fty)) -- FIXME (val) type?
+      let convert = macawTypeToReoptTy (Proxy @arch)
+       in pure $
+            funPtrTy
+              (map convert (fnArgTypes fty))
+              (maybe (error "No return type, investigate...") convert (fnReturnType fty)) -- FIXME (val) type?
  where
   punt = do
     warn "Punting on FnValue"
@@ -812,6 +834,7 @@ genCall ::
   Maybe (Some FnReturnVar) ->
   CGenM CGenBlockContext arch ()
 genCall fn args m_ret = do
+  -- traceM $ "genCall: " <> show fn
   m_ftyp <- functionTypeTyVars fn
 
   case m_ftyp of
@@ -824,6 +847,7 @@ genCall fn args m_ret = do
             ++ ")"
         )
     Just ftyp -> do
+      -- traceM $ "Found type: " <> show ftyp
       -- Arguments
       zipWithM_ go args (fttvArgs ftyp)
 
@@ -889,22 +913,24 @@ genFunction fn = do
 
 -- Allocates fresh type variables for a function type.
 freshFunctionTypeTyVars ::
+  forall ctx arch.
+  FnArchConstraints arch =>
   -- | Name of the function
   BSC.ByteString ->
   FunctionType arch ->
   CGenM ctx arch FunctionTypeTyVars
 freshFunctionTypeTyVars fn ft = do
-
   -- Create fresh type variables for all arguments types and the return type
   let fnStr = BSC.unpack fn
   args <- for (zip (fnArgTypes ft) [(0 :: Int) ..]) (\(_, i) -> freshTyVar (fnStr <> ".arg" <> show i))
   ret <- traverse (const (freshTyVar (fnStr <> ".ret"))) (fnReturnType ft)
 
   -- Immediately add constraints that resolve those type variables to their type
-  forM_ (zip args (fnArgTypes ft)) $ \ (tyVar, typ) ->
-    emitEq DeclaredTypeProv (varTy tyVar) $ macawTypeToReoptTy typ
+  forM_ (zip args (fnArgTypes ft)) $ \(tyVar, typ) ->
+    emitEq DeclaredTypeProv (varTy tyVar) $ macawTypeToReoptTy (Proxy @arch) typ
+
   case (ret, fnReturnType ft) of
-    (Just retTyVar, Just retTy) -> emitEq DeclaredTypeProv (varTy retTyVar) $ macawTypeToReoptTy retTy
+    (Just retTyVar, Just retTy) -> emitEq DeclaredTypeProv (varTy retTyVar) $ macawTypeToReoptTy (Proxy @arch) retTy
     _ -> pure ()
 
   pure (FunctionTypeTyVars args ret)
@@ -958,7 +984,7 @@ genModuleConstraints ::
   Bool ->
   Bool ->
   ModuleConstraints arch
-genModuleConstraints m mem trace orig = runCGenM mem trace orig $ do
+genModuleConstraints m mem traceWanted orig = runCGenM mem traceWanted orig $ do
   -- allocate type variables for functions without types
   -- FIXME: we currently ignore hints
 
@@ -1003,3 +1029,25 @@ genModuleConstraints m mem trace orig = runCGenM mem trace orig $ do
       , mcTypeMap = csTyVars tyMap
       , mcNamedTypes = csNamedStructs tyMap
       }
+
+-- | Returns attempted resolutions for the argument type variables and the
+-- return type variable.  The outermost `Maybe` indicates whether there was a
+-- return type variable, and the innermost indicates whether it was successfully
+-- resolved.
+resolveFunctionType :: ModuleConstraints arch -> FunctionTypeTyVars -> ([Maybe FTy], Maybe (Maybe FTy))
+resolveFunctionType constraints fty =
+  let
+    resolvetv tv = Map.lookup tv (mcTypeMap constraints)
+    args = map resolvetv (fttvArgs fty)
+    retTy = fmap resolvetv (fttvRet fty)
+   in
+    (args, retTy)
+
+asFullyResolvedFunctionType :: ModuleConstraints arch -> FunctionTypeTyVars -> Maybe FTy
+asFullyResolvedFunctionType constraints fty =
+  let (argsMaybe, ret) = resolveFunctionType constraints fty
+   in case (sequenceA argsMaybe, ret) of
+        (Nothing, _) -> Nothing
+        (_, Just Nothing) -> Nothing
+        (Just args, Nothing) -> Just $ FFunPtrTy args FVoidTy
+        (Just args, Just (Just retTy)) -> Just $ FFunPtrTy args retTy
