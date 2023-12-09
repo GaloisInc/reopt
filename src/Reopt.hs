@@ -2615,7 +2615,7 @@ fnStmtHasCandidate ::
   MemWidth (Macaw.ArchAddrWidth arch) =>
   Monad m =>
   FnStmt arch ->
-  m [Macaw.ArchMemAddr arch]
+  m [Macaw.ArchSegmentOff arch]
 fnStmtHasCandidate (FnCall _fn args _mRet) = do
   concatForM args $ \(Some fnValue) ->
     case fnValue of
@@ -2661,11 +2661,10 @@ reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap firstDiscState = 
     let allBlocks = concatMap fnBlocks (recoveredDefs recMod)
     let allStmts = concatMap fbStmts allBlocks
     candidateAddresses <- concatMapM fnStmtHasCandidate allStmts
-    let candidateAddressesAsSegOffs = mapMaybe (asSegmentOff (Macaw.memory discState)) candidateAddresses
     -- NOTE: if we mark addresses that have already been tried (even if they
     -- have failed), Macaw will not add them to the unexplored frontier, so
     -- there is no risk here.
-    let markedDiscState = Macaw.markAddrsAsFunction Macaw.UserRequest candidateAddressesAsSegOffs discState
+    let markedDiscState = Macaw.markAddrsAsFunction Macaw.UserRequest candidateAddresses discState
     let unexplored = markedDiscState ^. Macaw.unexploredFunctions
 
     if null unexplored

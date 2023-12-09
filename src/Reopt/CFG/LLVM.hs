@@ -711,7 +711,7 @@ valueToLLVM ctx avmap val = withArchConstraints ctx $ do
               L.IntToPtr
               ( L.Typed
                   (L.PrimType (L.Integer (fromInteger (8 * toInteger (addrWidthReprByteCount (archAddrWidth aInfo))))))
-                  (L.ValInteger (toInteger (addrOffset addr)))
+                  (L.ValInteger (toInteger (segoffOffset addr)))
               )
               ty
       return $ L.Typed ty value
