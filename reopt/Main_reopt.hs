@@ -17,6 +17,7 @@ import Data.ElfEdit qualified as Elf
 import Data.Generics.Labels ()
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.List qualified as List
+import Data.Map qualified as Map
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text qualified as T
 import Data.Version (Version (versionBranch))
@@ -718,7 +719,7 @@ showConstraints args elfPath = do
 
     let sysp = osPersonality os
     recoverX86Output <-
-      doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState
+      doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState Map.empty
 
     let recMod = recoveredModule recoverX86Output
     pure $ genModuleConstraints recMod (Macaw.memory discState) (traceTypeUnification args) (traceConstraintOrigins args)

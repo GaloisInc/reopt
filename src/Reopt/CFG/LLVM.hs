@@ -56,12 +56,14 @@ module Reopt.CFG.LLVM (
   callAsm,
   callAsm_,
   llvmITypeNat,
+  getInferredTypeBBLLVM,
+  runGetInferredType,
 ) where
 
 import Control.Lens
 import Control.Monad
 import Control.Monad.Except
-import Control.Monad.Reader
+import Control.Monad.Reader hiding (Reader)
 import Control.Monad.State.Strict
 import Data.Bifunctor (first)
 import Data.ByteString.Char8 qualified as BSC
@@ -73,12 +75,14 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Parameterized.Classes
 import Data.Parameterized.List qualified as PL
-import Data.Parameterized.NatRepr (widthVal)
+import Data.Parameterized.NatRepr (widthVal, intValue)
 import Data.Parameterized.Some
 import Data.Parameterized.TraversableF
 import Data.Proxy
 import Data.Text qualified as Text
 import Data.Vector qualified as V
+import Effectful
+import Effectful.Reader.Static qualified as R
 import Data.Word
 import GHC.Stack
 import GHC.TypeLits
@@ -104,6 +108,8 @@ import Reopt.Events (FunId, funId)
 import Reopt.TypeInference.ConstraintGen (
   FunctionTypeTyVars (..),
   ModuleConstraints (..),
+  asFullyResolvedFunctionType,
+  resolveFunctionType,
  )
 import Reopt.TypeInference.Solver (
   FTy,
@@ -112,11 +118,16 @@ import Reopt.TypeInference.Solver (
   pattern FConflictTy,
   pattern FFunPtrTy,
   pattern FNumTy,
+  pattern FPreFunPtrTy,
   pattern FPtrTy,
   pattern FUnknownFunPtrTy,
   pattern FUnknownTy,
+  pattern FTupleTy,
+  pattern FVecTy,
+  pattern FVoidTy,
  )
 import Reopt.VCG.Annotations qualified as Ann
+import Debug.Trace (trace)
 
 data LLVMBitCastInfo = LLVMBitCastInfo
   { llvmBitCastSrcType :: L.Type
@@ -961,8 +972,8 @@ appToLLVM lhs app = bbArchConstraints $ do
       llvmBitCast "appToLLVM" llvmVal (typeToLLVMType (widthEqTarget tp))
     BVAdd _sz x y -> do
       typeOfResult <- getInferredTypeForAssignIdBBLLVM lhs
-      tx <- getInferredType x
-      ty <- getInferredType y
+      tx <- getInferredTypeBBLLVM x
+      ty <- getInferredTypeBBLLVM y
       ptrWidth <- getPtrWidth'
 
       case (typeOfResult, tx, ty) of
@@ -998,8 +1009,8 @@ appToLLVM lhs app = bbArchConstraints $ do
       arithop (L.Add False False) r . L.typedValue =<< carryValue (typeWidth x) c
     BVSub _sz x y -> do
       typeOfResult <- getInferredTypeForAssignIdBBLLVM lhs
-      tx <- getInferredType x
-      ty <- getInferredType y
+      tx <- getInferredTypeBBLLVM x
+      ty <- getInferredTypeBBLLVM y
       ptrWidth <- getPtrWidth'
 
       case (typeOfResult, tx, ty) of
@@ -1250,7 +1261,7 @@ pointerForMemOp ::
   BBLLVM arch (L.Typed L.Value)
 pointerForMemOp ctx ptr pointeeType = do
   ptrV <- mkLLVMValue ptr
-  getInferredType ptr >>= \case
+  getInferredTypeBBLLVM ptr >>= \case
     Just FPtrTy{} -> llvmGEPFromPtr pointeeType 0 ptrV
     Just FConflictTy{} -> llvmAsPtr ctx pointeeType ptrV
     t -> error $ "Unexpected type at pointerForMemOp " ++ show (PP.pretty t)
@@ -1334,14 +1345,11 @@ resolveFunctionEntry dest =
               fromMaybe
                 (error "fnTypes 1")
                 (Map.lookup nm (mcExtFunTypes constraints))
-        let
-          resolvetv tv = Map.lookup tv (mcTypeMap constraints)
-          args = map resolvetv (fttvArgs fty)
-          retty = fmap resolvetv (fttvRet fty)
+        let (args, retTy) = resolveFunctionType constraints fty
         return
-          ( L.Typed (functionTypeToLLVM' dest_ftp args retty) (L.ValSymbol sym)
+          ( L.Typed (functionTypeToLLVM' dest_ftp args retTy) (L.ValSymbol sym)
           , args
-          , retty
+          , retTy
           )
     _ -> do
       error "Do not support indirect calls."
@@ -1365,7 +1373,7 @@ stmtToLLVM stmt = bbArchConstraints $ do
     FnAssignStmt (FnAssignment lhs rhs) -> do
       rhsToLLVM lhs rhs
     FnWriteMem addr v -> do
-      vty <- fromMaybe FUnknownTy <$> getInferredType v
+      vty <- fromMaybe FUnknownTy <$> getInferredTypeBBLLVM v
       let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
       let vty' = tyToLLVMType ptrWidth vty
       llvmPtr <- pointerForMemOp "rhsToLLVM(FnWriteMem)" addr vty'
@@ -1379,7 +1387,7 @@ stmtToLLVM stmt = bbArchConstraints $ do
       -- Compute value to write
       llvmValue <- singletonVector =<< mkLLVMValue v
       -- Convert addr to appropriate pointer.
-      vty <- fromMaybe FUnknownTy <$> getInferredType v
+      vty <- fromMaybe FUnknownTy <$> getInferredTypeBBLLVM v
       let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
       let vty' = tyToLLVMType ptrWidth vty
       p <- pointerForMemOp "rhsToLLVM(FnCondWriteMem)" addr vty'
@@ -1448,6 +1456,8 @@ coerceForSubtype m_vTy m_tgtTy v = do
       llvmAsPtr "coerceForSubtype" (tyToLLVMType ptrWidth ty) v
     (FUnknownTy, FFunPtrTy{}) -> pure v -- TODO (val) ?
     (FUnknownTy, FUnknownFunPtrTy{}) -> pure v -- TODO (val) ?
+    (FFunPtrTy argsL _retL, FPreFunPtrTy argsR FUnknownTy)
+      | length argsR <= length argsL -> pure v
     (t, t') -> do
       thisLabel <- gets bbThisLabel :: BBLLVM arch L.BlockLabel
       error $
@@ -1461,15 +1471,19 @@ coerceForSubtype m_vTy m_tgtTy v = do
 
 mkLLVMSubtypeValue ::
   forall arch tp.
+  MemWidth (ArchAddrWidth arch) =>
   FnValue arch tp ->
   Maybe FTy ->
   BBLLVM arch (L.Typed L.Value)
 mkLLVMSubtypeValue v m_tgtTy = do
-  m_vTy <- getInferredType v
+  m_vTy <- getInferredTypeBBLLVM v
   coerceForSubtype m_vTy m_tgtTy =<< mkLLVMValue v
 
 -- | Add Phi values for target block
-addTargetPhiValues :: forall arch. FnJumpTarget arch -> BBLLVM arch ()
+addTargetPhiValues ::
+  forall arch.
+  MemWidth (ArchAddrWidth arch) =>
+  FnJumpTarget arch -> BBLLVM arch ()
 addTargetPhiValues tgt = do
   thisLabel <- gets bbThisLabel :: BBLLVM arch L.BlockLabel
   let
@@ -1503,6 +1517,7 @@ addTargetPhiValues tgt = do
 
 termStmtToLLVM ::
   HasCallStack =>
+  MemWidth (ArchAddrWidth arch) =>
   FnTermStmt arch ->
   BBLLVM arch ()
 termStmtToLLVM tm =
@@ -1573,7 +1588,7 @@ resolvePhiStmt constraints function phiValues b =
     -- takes precedence over the type we inferred at recovery time.
     llvmType :: L.Type
     llvmType =
-      case getKnownInferredType constraints function phiAssignId of
+      case getKnownInferredType function constraints phiAssignId of
         Just inferredType -> tyToLLVMType ptrWidth inferredType
         Nothing -> viewSome (typeToLLVMType . fnPhiVarType) (phiFnRepVar b)
     llvmPhiValues :: [(L.Value, L.BlockLabel)]
@@ -1642,6 +1657,7 @@ addPhiBinding (Some phiVar) = do
 
 addLLVMBlock ::
   forall arch.
+  MemWidth (ArchAddrWidth arch) =>
   -- | Context for block
   FunLLVMContext arch ->
   FunState arch ->
@@ -1948,7 +1964,6 @@ defineFunction aInfo archOps genOpts constraints f = do
         , needSwitchFailLabel = False
         , funBlockPhiMap = initResolvePhiMap f
         }
-  -- trace (show (PP.pretty (fnEntryBlock f))) (pure ())
   let (postEntryFunState, entryBlockRes) =
         addLLVMBlock ctx initFunState (fnEntryBlock f)
 
@@ -2099,25 +2114,106 @@ moduleForFunctions aInfo archOps genOpts recMod constraints =
    in
     (llvmMod, snd <$> definesAndAnn, annDecls, logEvents)
 
+type GetInferredTypeEffects arch es =
+  ( R.Reader BSC.ByteString :> es
+  , R.Reader (ModuleConstraints arch) :> es
+  )
+
+macawTypeToFTy :: Some TypeRepr -> FTy
+macawTypeToFTy = viewSome go
+ where
+  go :: TypeRepr ty -> FTy
+  go BoolTypeRepr = FNumTy 1
+  go (BVTypeRepr n) = FNumTy (fromInteger (intValue n))
+  go (FloatTypeRepr _flt) = error "TODO: support float in type inference"
+  go (TupleTypeRepr s) = FTupleTy $ toListFC go s
+  go (VecTypeRepr w tp) = FVecTy (fromInteger (intValue w)) (go tp)
+
+functionTypeToFTy :: FunctionType arch -> FTy
+functionTypeToFTy fty | fnVarArgs fty = error "functionTypeToFTy: varargs"
+functionTypeToFTy fty =
+  FFunPtrTy (mkArg <$> fnArgTypes fty) (mkRet $ fnReturnType fty)
+  where
+    mkArg :: Some TypeRepr -> FTy
+    mkArg = macawTypeToFTy
+    mkRet :: Maybe (Some TypeRepr) -> FTy
+    mkRet Nothing = FVoidTy
+    mkRet (Just tau) = macawTypeToFTy tau
+
 -- | Returns the type that was inferred for the given value via constraint
 -- solving, if any.
-getInferredType :: FnValue arch tp -> BBLLVM arch (Maybe FTy)
-getInferredType FnUndefined{} = pure Nothing
-getInferredType (FnConstantValue sz _) = pure (Just (FNumTy (widthVal sz)))
-getInferredType FnConstantBool{} = pure Nothing
-getInferredType FnFunctionEntryValue{} = pure Nothing
-getInferredType (FnAssignedValue (FnAssignment aId _)) = getInferredTypeForAssignIdBBLLVM aId
-getInferredType (FnPhiValue phiVar) = getInferredTypeForAssignIdBBLLVM (unFnPhiVar phiVar)
-getInferredType (FnReturn (FnReturnVar retVar _)) = getInferredTypeForAssignIdBBLLVM retVar
-getInferredType (FnArg arg _typ) = do
-  fn <- asks funName
-  getInferredFunctionArgType fn arg
-getInferredType (FnCodePointer{}) = pure Nothing -- TODO
-getInferredType (FnTypedCodePointer _args _ret) = error "TODO" -- TODO
+getInferredType ::
+  forall arch es tp.
+  GetInferredTypeEffects arch es =>
+  MemWidth (ArchAddrWidth arch) =>
+  Proxy arch ->
+  FnValue arch tp ->
+  Eff es (Maybe FTy)
+getInferredType _ FnUndefined{} = pure Nothing
+getInferredType _ (FnConstantValue sz _) = pure (Just (FNumTy (widthVal sz)))
+getInferredType _ FnConstantBool{} = pure Nothing
+getInferredType _ (FnFunctionEntryValue fty nm) = do
+  -- NOTE: This is where we must ignore the Macaw type of the function symbol,
+  -- as it is less precise than the types we obtain through constraint solving.
+  -- Namely, function pointers will just have a numeric type in Macaw.
+  mc <- R.ask @(ModuleConstraints arch)
+  case Map.lookup nm (mcExtFunTypes mc) of
+    Nothing ->
+      trace ("Warning: defaulting to Macaw type because we could not find type for " <> show nm)
+        $ pure $ Just $ functionTypeToFTy fty
+    Just ftyv ->
+      case asFullyResolvedFunctionType mc ftyv of
+        Nothing ->
+          trace ("Warning: defaulting to Macaw type because we could not instantiate type variables for " <> show nm)
+            $ pure $ Just $ functionTypeToFTy fty
+        Just resolved -> pure $ Just resolved
+  -- pure $ Just $ functionTypeToFTy fty
+getInferredType pxy (FnAssignedValue (FnAssignment aId _)) = getInferredTypeForAssignId pxy aId
+getInferredType pxy (FnPhiValue phiVar) = getInferredTypeForAssignId pxy (unFnPhiVar phiVar)
+getInferredType pxy (FnReturn (FnReturnVar retVar _)) = getInferredTypeForAssignId pxy retVar
+getInferredType pxy (FnArg arg _typ) = do
+  fn <- R.ask @BSC.ByteString
+  getInferredFunctionArgType pxy fn arg
+getInferredType _ (FnCodePointer fn) = do
+  mc <- R.ask @(ModuleConstraints arch)
+  case Map.lookup fn (mcFunTypes mc) of
+    Nothing -> error $ "getInferredType: lookup failed for " <> show (PP.pretty fn)
+    Just fty ->
+      case asFullyResolvedFunctionType mc fty of
+        Just ty -> return $ Just ty
+        Nothing -> error $ "getInferredType: could not resolve " <> show fty
+getInferredType _ (FnTypedCodePointer _args _ret) = error "TODO" -- TODO
 
-getInferredFunctionArgType :: BSC.ByteString -> Int -> BBLLVM arch (Maybe FTy)
-getInferredFunctionArgType fn arg = do
-  constraints <- asks moduleConstraints
+-- | Run `getInferredType`, passing the necessary information explicitly.
+runGetInferredType ::
+  MemWidth (ArchAddrWidth arch) =>
+  BSC.ByteString -> ModuleConstraints arch -> Proxy arch -> FnValue arch tp -> Maybe FTy
+runGetInferredType bs mc pa fv =
+  runPureEff
+    . R.runReader bs
+    . R.runReader mc
+    $ getInferredType pa fv
+
+-- | Runs `getInferredType` in a `BBLLVM` monadic context, where all the
+-- information needed is available.
+getInferredTypeBBLLVM ::
+  forall arch tp.
+  MemWidth (ArchAddrWidth arch) =>
+  FnValue arch tp -> BBLLVM arch (Maybe FTy)
+getInferredTypeBBLLVM fv = do
+  fn <- asks funName
+  mc <- asks moduleConstraints
+  return $ runGetInferredType fn mc (Proxy @arch) fv
+
+getInferredFunctionArgType ::
+  forall arch es.
+  GetInferredTypeEffects arch es =>
+  Proxy arch ->
+  BSC.ByteString ->
+  Int ->
+  Eff es (Maybe FTy)
+getInferredFunctionArgType _ fn arg = do
+  constraints <- R.ask @(ModuleConstraints arch)
   let fnTypes =
         fromMaybe
           (error "fnTypes 1")
@@ -2125,33 +2221,47 @@ getInferredFunctionArgType fn arg = do
   let argTyVar = fttvArgs fnTypes !! arg
   return (Map.lookup argTyVar (mcTypeMap constraints))
 
-getInferredTypeForAssignIdBBLLVM ::
-  FnAssignId -> BBLLVM arch (Maybe FTy)
-getInferredTypeForAssignIdBBLLVM aId = do
-  fn <- asks funName
-  constraints <- asks moduleConstraints
-  return (getInferredTypeForAssignId constraints fn aId)
+getInferredTypeForAssignIdBBLLVM :: FnAssignId -> BBLLVM arch (Maybe FTy)
+getInferredTypeForAssignIdBBLLVM aId =
+  do
+    fn <- asks funName
+    mc <- asks moduleConstraints
+    return $ runGetInferredTypeForAssignId fn mc aId
+
+runGetInferredTypeForAssignId ::
+  forall arch.
+  BSC.ByteString -> ModuleConstraints arch -> FnAssignId -> Maybe FTy
+runGetInferredTypeForAssignId fn mc aId =
+  runPureEff
+    . R.runReader fn
+    . R.runReader mc
+    $ getInferredTypeForAssignId (Proxy @arch) aId
 
 getInferredTypeForAssignId ::
-  ModuleConstraints arch ->
-  BSC.ByteString ->
+  forall arch es.
+  GetInferredTypeEffects arch es =>
+  Proxy arch ->
   FnAssignId ->
-  Maybe FTy
-getInferredTypeForAssignId constraints fn aId = do
+  Eff es (Maybe FTy)
+getInferredTypeForAssignId _ aId = trace ("Getting inferred type for aId " <> show aId) $ do
+  fn <- R.ask
+  constraints <- R.ask @(ModuleConstraints arch)
   let fnTypes =
         fromMaybe
           (error ("Missing function key in mcAssignTyVars: " <> show fn))
           (Map.lookup fn (mcAssignTyVars constraints))
-  valTyVar <- Map.lookup aId fnTypes
-  Map.lookup valTyVar (mcTypeMap constraints)
+  return $ do
+    valTyVar <- Map.lookup aId fnTypes
+    Map.lookup valTyVar (mcTypeMap constraints)
 
 getKnownInferredType ::
-  ModuleConstraints arch ->
+  forall arch.
   BSC.ByteString ->
+  ModuleConstraints arch ->
   FnAssignId ->
   Maybe FTy
-getKnownInferredType constraints fn aId =
-  case getInferredTypeForAssignId constraints fn aId of
+getKnownInferredType fn constraints aId =
+  case runGetInferredTypeForAssignId fn constraints aId of
     Nothing -> Nothing
     Just FUnknownTy -> Nothing
     Just t -> Just t

@@ -59,6 +59,8 @@ library
     extra,
     filepath,
     flexdis86 >= 0.1.1,
+    effectful,
+    effectful-core,
     galois-dwarf >= 0.2.2,
     generic-lens,
     hashable < 1.4,

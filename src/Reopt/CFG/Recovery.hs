@@ -15,6 +15,7 @@ module Reopt.CFG.Recovery (
   Data.Macaw.Analysis.RegisterUse.BlockInvariantMap,
   x86BlockInvariants,
   x86CallRegs,
+  FunctionPointerTypes,
 
   -- * X86 type info
   X86FunTypeInfo (..),
@@ -292,6 +293,8 @@ type FnRegValue arch = EmbeddingApp (FnValue arch)
 ------------------------------------------------------------------------
 -- Function recover monad
 
+type FunctionPointerTypes arch = Map (ArchMemAddr arch) (FunctionType arch)
+
 -- | Information for function recovery common to a function or module.
 data FunRecoverContext ids = FRC
   { frcMemory :: !(Memory 64)
@@ -303,6 +306,7 @@ data FunRecoverContext ids = FRC
   , frcBlockDepMap :: !(Map (MemSegmentOff 64) (BlockInvariants X86_64 ids))
   -- ^ Maps the starting address of blocks to the dependency set
   -- for the block.
+  , frcFunctionPointerTypes :: FunctionPointerTypes X86_64
   }
 
 -- | State for function recovery common to all blocks in a function.
@@ -312,7 +316,10 @@ data FunRecoverState = FRS
   }
 
 -- | Monad for function recovery
-newtype FunRecover ids a = FR {runFR :: ReaderT (FunRecoverContext ids) (StateT FunRecoverState (Except (RecoverError 64))) a}
+newtype FunRecover ids a = FR
+  { runFR ::
+      ReaderT (FunRecoverContext ids) (StateT FunRecoverState (Except (RecoverError 64))) a
+  }
   deriving (Functor, Applicative, Monad, MonadState FunRecoverState, MonadError (RecoverError 64))
 
 runFunRecover ::
@@ -546,8 +553,13 @@ recoverCValue cv = do
     RelocatableCValue _w addr
       | Just addrRef <- asSegmentOff mem addr
       , Perm.isExecutable (segmentFlags (segoffSegment addrRef)) -> do
-        pure $ FnCodePointer addrRef
-          -- throwErrorAt ReoptUnsupportedFnValueTag "Cannot lift code pointers."
+          funPtrTys <- frcFunctionPointerTypes <$> getFunCtx
+          return $ case Map.lookup addr funPtrTys of
+            Nothing -> FnCodePointer addrRef
+            -- NOTE (val) I don't think the following ever happens yet, because
+            -- we're not actually connecting the PLT stub to the symbol whose
+            -- type we know...
+            Just fty -> FnTypedCodePointer addr fty
       | otherwise ->
           case asAbsoluteAddr addr of
             Just absAddr -> emitNewAssign (toInteger absAddr)
@@ -1870,7 +1882,9 @@ x86CallRegs mem funNameMap funTypeMap _callSite regs = do
             Left $ Reason CallTargetNotFunctionEntryPoint (memWordValue (addrOffset faddr))
       SymbolValue _ (SymbolRelocation nm _ver) -> do
         pure nm
-      _ -> Left $ Reason IndirectCallTarget ()
+      AssignedValue{} ->
+        Left $ Reason IndirectCallTarget ()
+      _ -> error $ "x86CallRegs, consider: " <> show ipVal
   case funTypeMap nm of
     Just tp -> x86TranslateCallType mem nm regs tp
     Nothing -> Left $ Reason UnknownCallTargetArguments nm
@@ -1956,8 +1970,9 @@ recoverFunction ::
   [X86ArgInfo] ->
   -- | Type of return types
   [Some X86RetInfo] ->
+  FunctionPointerTypes X86_64 ->
   Either (RecoverError 64) (RecoveredFunction X86_64)
-recoverFunction sysp mem fInfo invMap nm curArgs curRets = do
+recoverFunction sysp mem fInfo invMap nm curArgs curRets funPtrTys = do
   -- Get address of function entry point
   let entryAddr = discoveredFunAddr fInfo
   let funCtx =
@@ -1967,6 +1982,7 @@ recoverFunction sysp mem fInfo invMap nm curArgs curRets = do
           , frcSyscallPersonality = sysp
           , frcCurrentFunctionReturns = curRets
           , frcBlockDepMap = invMap
+          , frcFunctionPointerTypes = funPtrTys
           }
   runFunRecover funCtx $ do
     let entryBlk = fromJust $ Map.lookup entryAddr (fInfo ^. parsedBlocks)
