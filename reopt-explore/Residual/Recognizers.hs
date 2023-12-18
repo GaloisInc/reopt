@@ -29,6 +29,9 @@ ppResidualExplanation = \case
   BecauseFailure PLTStubNotSupported               -> "PLT stub not supported"
   BecauseFailure (CallAnalysisError _callSite msg) -> msg
 
+-- | Identifies known patterns of sequences of disassembled instructions that
+-- correspond to some residual explanations.  For instance, if all instructions
+-- are no-ops, this is a no-op padding residual.
 classifyInstrs :: [DisassembledAddr] -> Maybe ResidualExplanation
 classifyInstrs instrs
   | isNopPadding instrs = Just NopPadding
