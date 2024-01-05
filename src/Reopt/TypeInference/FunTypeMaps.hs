@@ -23,6 +23,7 @@ module Reopt.TypeInference.FunTypeMaps (
 
 import Control.Monad.State
 import Data.ByteString qualified as BS
+import Data.ByteString.UTF8 qualified as UTF8
 import Data.ElfEdit.Prim qualified as Elf
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -31,7 +32,7 @@ import Prettyprinter qualified as PP
 import Text.Printf (printf)
 
 import Data.Macaw.Discovery (NoReturnFunStatus (..))
-import Data.Macaw.Memory (MemSegmentOff)
+import Data.Macaw.Memory (MemSegmentOff, MemWidth)
 
 import Reopt.TypeInference.HeaderTypes (AnnFunType)
 
@@ -49,6 +50,9 @@ data QualifiedSymbolName = QualifiedSymbolName
   -- symbols are only unique for a compilation unit.
   }
   deriving (Show)
+
+instance PP.Pretty QualifiedSymbolName where
+  pretty = PP.viaShow
 
 mkQualifiedSymbolName ::
   Elf.SymtabEntry BS.ByteString w ->
@@ -83,6 +87,23 @@ data SymAddrMap w = SymAddrMap
   -- use the first symbol with that address in the symbol table but
   -- prioritize global symbols over local symbols.
   }
+
+prettyMapExplicit :: (a -> PP.Doc c) -> (b -> PP.Doc c) -> Map a b -> PP.Doc c
+prettyMapExplicit ppKey ppVal = PP.vcat . map prettyEntry . Map.assocs
+  where
+    prettyEntry (a, b) = PP.hsep [ppKey a, "↦", ppVal b]
+
+prettyMap :: PP.Pretty a => PP.Pretty b => Map a b -> PP.Doc c
+prettyMap = prettyMapExplicit PP.pretty PP.pretty
+
+instance MemWidth w => PP.Pretty (SymAddrMap w) where
+  pretty sam =
+    PP.vcat
+      ["Name map:"
+      , prettyMapExplicit (PP.pretty . UTF8.toString) (PP.pretty . Set.toList) (samNameMap sam)
+      , "Address map:"
+      , prettyMap (samAddrMap sam)
+      ]
 
 -- | Return list of names and addresses stored in sym addr map
 symAddrMapContents :: SymAddrMap w -> [(BS.ByteString, MemSegmentOff w)]
@@ -184,6 +205,19 @@ data FunTypeMaps w = FunTypeMaps
   -- to type.
   , noreturnMap :: !(Map (MemSegmentOff w) NoReturnFunStatus)
   }
+
+instance MemWidth w => PP.Pretty (FunTypeMaps w) where
+  pretty ftm =
+    PP.vcat
+      [ "Name to address map:"
+      , PP.pretty (nameToAddrMap ftm)
+      , "Name to type map:"
+      , prettyMapExplicit (PP.pretty . UTF8.toString) PP.pretty (nameTypeMap ftm)
+      , "Address to type map:"
+      , prettyMap (addrTypeMap ftm)
+      , "No return map:"
+      , prettyMap (noreturnMap ftm)
+      ]
 
 -- | Empty function type information.
 funTypeMapsEmpty :: FunTypeMaps w
