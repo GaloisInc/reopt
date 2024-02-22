@@ -2603,12 +2603,8 @@ checkNoSymbolUsesReservedPrefix unnamedFunPrefix symAddrMap = do
           "No symbol in the binary may start with the prefix %d."
           (BSC.unpack unnamedFunPrefix)
 
--- | Checks whether a given `FnStmt` has a potential code pointer address we
--- want to try and investigate.  We intended for such addresses to be identified
--- via type reconstruction, but it turns out that we can just get away with
--- identifying code-pointer-sized values pointing into an executable segment.
--- However, we could double-check with the results of type reconstruction to
--- potentially avoid some spurious pointers.
+-- | Checks whether a given `FnStmt` has a potential code pointer address we want to try and
+-- investigate.
 fnStmtHasCandidate ::
   forall arch r.
   FnArchConstraints arch =>
@@ -2622,14 +2618,32 @@ fnStmtHasCandidate ::
 fnStmtHasCandidate modConstraints fun (FnCall fn args _mRet) = do
   let ty = runGetInferredType (fnName fun) modConstraints (Proxy @arch) fn
   let
-    keepIfPromising :: (Some (FnValue arch), FTy) -> ReoptM arch r [Macaw.ArchSegmentOff arch]
-    keepIfPromising (Some (FnCodePointer addr), FFunPtrTy{}) = return [addr]
-    keepIfPromising (Some (FnCodePointer addr), FPreFunPtrTy{}) = return [addr]
-    keepIfPromising (Some (FnCodePointer addr), FUnknownFunPtrTy{}) = return [addr]
-    keepIfPromising pair = do
+
+    infoKeeping :: ArchSegmentOff arch -> ReoptM arch r ()
+    infoKeeping addr =
       globalStepInfo Events.DebugTypeInference -- FIXME: may need new global steps
-        ("Not keeping " <> show pair <> " as promising") -- only while debugging
-      return []
+        ("Keeping " <> show addr <> " as promising in " <> BSC.unpack (fnName fun))
+    infoNotKeepingAddr :: ArchSegmentOff arch -> FTy -> ReoptM arch r ()
+    infoNotKeepingAddr addr aty =
+      globalStepInfo Events.DebugTypeInference -- FIXME: may need new global steps
+        ("Not keeping " <> show addr <> " as promising in " <> BSC.unpack (fnName fun)
+          <> " because of its type " <> show aty)
+    infoNotKeepingOther :: (Some (FnValue arch), FTy) -> ReoptM arch r ()
+    infoNotKeepingOther other =
+      globalStepInfo Events.DebugTypeInference -- FIXME: may need new global steps
+        ("Not keeping " <> show other <> " as promising in " <> BSC.unpack (fnName fun)
+          <> " because it does not explicitly contain an address")
+
+    keepIfPromising :: (Some (FnValue arch), FTy) -> ReoptM arch r [Macaw.ArchSegmentOff arch]
+    keepIfPromising (Some (FnCodePointer addr), FFunPtrTy{}) =
+      infoKeeping addr >> return [addr]
+    keepIfPromising (Some (FnCodePointer addr), FPreFunPtrTy{}) =
+      infoKeeping addr >> return [addr]
+    keepIfPromising (Some (FnCodePointer addr), FUnknownFunPtrTy{}) =
+      infoKeeping addr >> return [addr]
+    keepIfPromising (Some (FnCodePointer addr), aty) = infoNotKeepingAddr addr aty >> return []
+    keepIfPromising pair = infoNotKeepingOther pair >> return []
+
   case ty of
     Just (FFunPtrTy argsTy _retTy) ->
       if length args /= length argsTy
