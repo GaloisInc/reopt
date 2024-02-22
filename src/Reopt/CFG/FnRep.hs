@@ -272,6 +272,7 @@ type FnArchConstraints arch =
   , Macaw.MemWidth (ArchAddrWidth arch)
   , HasRepr (ArchFn arch (FnValue arch)) TypeRepr
   , HasRepr (ArchReg arch) TypeRepr
+  , ShowF (ArchReg arch)
   )
 
 instance Macaw.MemWidth (ArchAddrWidth arch) => PP.Pretty (FnValue arch tp) where
