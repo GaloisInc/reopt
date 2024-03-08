@@ -1,4 +1,4 @@
-module CommandLine (getOptions, Options (..), Command (..), ResidualOptions (..), LLVMOptions (..)) where
+module CommandLine (getOptions, Options (..), Command (..), ResidualOptions (..), LLVMOptions (..), GroundTruthOptions (..)) where
 
 import Options.Applicative
 
@@ -9,7 +9,30 @@ data Options = Options
   , optCommand :: Command
   }
 
-data Command = RunLLVM LLVMOptions | RunResidual ResidualOptions
+data Command = RunLLVM LLVMOptions | RunResidual ResidualOptions | RunGroundTruth GroundTruthOptions
+
+------------------------------------------------------------------------------------------
+-- Ground Truth
+
+data GroundTruthOptions = GroundTruthOptions 
+  {
+    gtPaths :: ![FilePath]
+  , gtExportDir :: !(Maybe FilePath)
+  }
+
+groundTruthP :: Parser Command
+groundTruthP = 
+    fmap RunGroundTruth $
+        GroundTruthOptions
+        <$> some argsP
+        <*> optional exportProtoP
+
+exportProtoP :: Parser FilePath
+exportProtoP =
+  strOption $
+    long "export-fn-results"
+      <> metavar "PATH"
+      <> help "Directory at which to write the ground truth protobufs."
 
 ------------------------------------------------------------------------------------------
 -- Residual
@@ -146,6 +169,8 @@ commandP =
   hsubparser $
     command "residuals" (info residualP (progDesc "Print out the residuals in the given binary"))
       <> command "llvm" (info llvmP (progDesc "Generate a binary via LLVM"))
+      <> command "ground-truth" (info groundTruthP (progDesc "Dump discovery information as protobuf to compare with ground truth"))
+
 
 -- | Used to add a path at which to search for dynamic dependencies.
 dynDepPathP :: Parser FilePath

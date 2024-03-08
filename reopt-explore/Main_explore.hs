@@ -13,6 +13,7 @@ import Reopt
 import CommandLine
 import Residual
 import LLVM
+import GroundTruth
 
 -- -- | Summary of results from parsing the debug info of an elf file.
 -- data ExploreDebugResult =
@@ -119,8 +120,9 @@ main = do
                                     roDynDepDebugPaths = optDynDepDebugPath opts ++ gdbDebugDirs
                                   }
   case optCommand opts of
-    RunResidual gopts -> runResidual opts gopts ropts
-    RunLLVM     lopts -> runLLVM opts lopts ropts
+    RunResidual        gopts -> runResidual opts gopts ropts
+    RunLLVM            lopts -> runLLVM opts lopts ropts
+    RunGroundTruth     gtopts -> runGroundTruth opts gtopts ropts
 
 {-  
   args <- getCommandLineArgs

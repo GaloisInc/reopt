@@ -215,6 +215,7 @@ executable reopt-explore
   main-is: Main_explore.hs
   other-modules: Paths_reopt
                , CommandLine
+               , GroundTruth
                , GroundTruth.Blocks
                , GroundTruth.Blocks_Fields
                , Residual
