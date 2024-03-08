@@ -205,6 +205,8 @@ executable reopt-explore
     optparse-applicative >= 0.18.1.0,
     parameterized-utils >= 0.1.6,
     prettyprinter,
+    proto-lens,
+    proto-lens-runtime,
     reopt,
     unix,
     vector
@@ -213,6 +215,8 @@ executable reopt-explore
   main-is: Main_explore.hs
   other-modules: Paths_reopt
                , CommandLine
+               , GroundTruth.Blocks
+               , GroundTruth.Blocks_Fields
                , Residual
                , Residual.Recognizers
                , LLVM
