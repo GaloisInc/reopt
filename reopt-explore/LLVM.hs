@@ -173,13 +173,11 @@ exploreBinary args opts totalCount (index, fPath) = do
         ++ fPath
         ++ " ..."
     bs <- checkedReadFile fPath
+
     summaryRef <- newIORef $ initReoptSummary fPath
     statsRef <- newIORef mempty
-    let logger
-          | roVerboseMode opts =
-              joinLogEvents printLogEvent (recoverLogEvent summaryRef statsRef)
-          | otherwise =
-              recoverLogEvent summaryRef statsRef
+    logger <- createLogger opts summaryRef statsRef 
+
     let annDecl = emptyAnnDeclarations
     hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
     (os, _, recovOut, _, constraints) <-

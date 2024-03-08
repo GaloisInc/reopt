@@ -30,7 +30,6 @@ import Reopt (
   parseElfHeaderInfo64,
   recoverX86Elf,
   resolveHeader,
-  roVerboseMode,
   runReoptM,
  )
 import Reopt.CFG.FnRep (
@@ -43,11 +42,8 @@ import Reopt.CFG.FnRep (
   recoveredDefs,
  )
 import Reopt.Events (
-  ReoptLogEvent,
   initReoptSummary,
-  joinLogEvents,
   printLogEvent,
-  recoverLogEvent,
  )
 import Reopt.Utils.Exit (
   checkedReadFile,
@@ -59,7 +55,7 @@ import CommandLine (
   Options,
   ResidualOptions (roClangPath, roHeader, roOutputForSpreadsheet, roPaths),
  )
-import Common (findAllElfFilesInDirs)
+import Common (findAllElfFilesInDirs, createLogger)
 import Data.Either (fromRight)
 import Data.ElfEdit (
   ElfHeaderInfo,
@@ -124,15 +120,6 @@ type RangedShdr nm w = (InclusiveRange w, Shdr nm w)
 rangedShdr :: (Num w, Ord w) => Shdr nm w -> Maybe (RangedShdr nm w)
 rangedShdr s = (,s) <$> shdrInclusiveRange s
 
-createLogger :: ReoptOptions -> FilePath -> IO (ReoptLogEvent arch -> IO ())
-createLogger reoptOpts filePath = do
-  summaryRef <- newIORef $ initReoptSummary filePath
-  statsRef <- newIORef mempty
-  return $
-    if roVerboseMode reoptOpts
-      then joinLogEvents printLogEvent (recoverLogEvent summaryRef statsRef)
-      else recoverLogEvent summaryRef statsRef
-
 performRecovery ::
   ResidualOptions ->
   ReoptOptions ->
@@ -150,7 +137,11 @@ performRecovery residualOpts reoptOpts (_idx, fPath) = do
       (resolveHeader (roHeader residualOpts) (roClangPath residualOpts))
       >>= either (error . show) return
   hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
-  logger <- createLogger reoptOpts fPath
+
+  summaryRef <- newIORef $ initReoptSummary fPath
+  statsRef <- newIORef mempty
+  logger <- createLogger reoptOpts summaryRef statsRef
+
   (_os, ds, recovOut, _, _) <-
     handleEitherWithExit
       =<< runReoptM
