@@ -1884,6 +1884,8 @@ x86CallRegs mem funNameMap funTypeMap _callSite regs = do
         pure nm
       AssignedValue{} ->
         Left $ Reason IndirectCallTarget ()
+      Initial{} ->
+        Left $ Reason IndirectCallTarget ()
       _ -> error $ "x86CallRegs, consider: " <> show ipVal
   case funTypeMap nm of
     Just tp -> x86TranslateCallType mem nm regs tp
