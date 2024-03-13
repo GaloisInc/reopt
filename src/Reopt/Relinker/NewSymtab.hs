@@ -8,10 +8,10 @@ module Reopt.Relinker.NewSymtab (
   NewSectionIndex (..),
 ) where
 
+import Control.Monad (when)
 import Control.Monad.Except (
   Except,
   MonadError (throwError),
-  when,
  )
 import Control.Monad.State (State, modify, runState)
 import Data.ByteString qualified as BS

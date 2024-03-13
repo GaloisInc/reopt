@@ -9,13 +9,13 @@ module Reopt.Relinker (
   x86_64_immediateJump,
 ) where
 
+import Control.Monad (when)
 import Control.Monad.Except (
   Except,
   ExceptT (..),
   MonadError (throwError),
   runExcept,
   runExceptT,
-  when,
  )
 import Control.Monad.State (State, execState, modify, runState)
 import Data.Bits (Bits ((.&.), (.|.)))

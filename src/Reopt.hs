@@ -1,3 +1,4 @@
+{-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Reopt (
@@ -107,18 +108,18 @@ import Control.Exception (
   try,
  )
 import Control.Lens ((&), (.~), (^.))
+import Control.Monad (
+  forM,
+  forM_,
+  unless,
+  when,
+ )
 import Control.Monad.Except (
   Except,
   ExceptT,
   MonadError (throwError),
-  MonadIO (liftIO),
-  MonadTrans (lift),
-  forM,
-  forM_,
   runExcept,
   runExceptT,
-  unless,
-  when,
  )
 import Control.Monad.Extra (concatMapM)
 import Control.Monad.Reader (ReaderT (..))
@@ -128,6 +129,10 @@ import Control.Monad.State (
   execStateT,
   modify,
   runState,
+ )
+import Control.Monad.Trans (
+  MonadIO (liftIO),
+  MonadTrans (lift),
  )
 import Data.Bits (
   Bits (popCount, shiftR, (.&.), (.|.)),
@@ -2002,30 +2007,17 @@ instance IsString LLVMVersion where
 
 type LLVMConfig = LPP.Config
 
--- | Configuration for LLVM 3.5 - 3.6
-llvm35Config :: LLVMConfig
-llvm35Config =
-  LPP.Config
-    { LPP.cfgLoadImplicitType = True
-    , LPP.cfgGEPImplicitType = True
-    , LPP.cfgUseDILocation = False
-    }
-
--- | Configuration for LLVM 3.7 & 3.8
-latestLLVMConfig :: LLVMConfig
-latestLLVMConfig =
-  LPP.Config
-    { LPP.cfgLoadImplicitType = False
-    , LPP.cfgGEPImplicitType = False
-    , LPP.cfgUseDILocation = True
-    }
-
 llvmVersionMap :: Map LLVMVersion LLVMConfig
 llvmVersionMap =
   Map.fromList
-    [ (,) "3.5.0" llvm35Config
-    , (,) "3.7.0" latestLLVMConfig
+    [ (,) "3.5.0" (LPP.Config LPP.llvmV3_5)
+    , (,) "3.6.0" (LPP.Config LPP.llvmV3_6)
+    , (,) "3.7.0" (LPP.Config LPP.llvmV3_7)
+    , (,) "3.8.0" (LPP.Config LPP.llvmV3_8)
     ]
+
+latestLLVMConfig :: LLVMConfig
+latestLLVMConfig = LPP.Config LPP.llvmVlatest
 
 --  | Get the LLVM LLVM config associated with a version
 getLLVMConfig :: LLVMVersion -> Maybe LLVMConfig
@@ -2860,6 +2852,7 @@ renderLLVMIR ::
   )
 renderLLVMIR llvmGenOpt llvmConfig os recMod constraints =
   -- Generate LLVM module
+  let ?config = llvmConfig in
   let
     archOps = LLVM.x86LLVMArchOps (show os)
     aInfo = osArchitectureInfo os

@@ -5,13 +5,17 @@ module Reopt.TypeInference.DebugTypes (
   resolveDebugFunTypes,
 ) where
 
+import Control.Monad (
+  unless,
+  when,
+ )
 import Control.Monad.Except (
   ExceptT,
   MonadError (throwError),
-  MonadTrans (lift),
   runExceptT,
-  unless,
-  when,
+ )
+import Control.Monad.Trans (
+  MonadTrans (lift),
  )
 import Data.ByteString.Char8 qualified as BSC
 import Data.ElfEdit qualified as Elf

@@ -1,3 +1,5 @@
+{-# LANGUAGE ImplicitParams #-}
+
 module LLVM (runLLVM) where
 
 import Control.Exception (
@@ -22,6 +24,7 @@ import System.IO (
  )
 import System.Timeout (timeout)
 import Text.Printf (printf)
+import Text.LLVM.PP qualified as LPP
 
 import Reopt (
   LLVMLogEvent,
@@ -77,7 +80,7 @@ renderExplorationResult (ExplorationStats summary stats lgen _logEvents) = do
 renderExplorationResult (ExplorationFailure path msg) =
   "Exploration of " ++ path ++ " failed: " ++ msg
 
-renderLogEvents :: ExplorationResult -> Maybe [String]
+renderLogEvents :: (?config :: LPP.Config) => ExplorationResult -> Maybe [String]
 renderLogEvents (ExplorationStats summary _stats lgen events) =
   Just $ map renderRow $ events ++ llvmGenLogEvents lgen
  where
@@ -232,6 +235,7 @@ exploreBinary args opts totalCount (index, fPath) = do
 
 runLLVM :: Options -> LLVMOptions -> ReoptOptions -> IO ()
 runLLVM _opts lopts ropts = do
+  let ?config = latestLLVMConfig
   results <- exploreAllElfInDirs lopts ropts (loPaths lopts)
   mapM_ (\s -> hPutStr stderr ("\n" ++ renderExplorationResult s)) results
   hPutStrLn stderr $ renderSummaryStats results

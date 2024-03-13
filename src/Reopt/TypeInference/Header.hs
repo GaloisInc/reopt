@@ -6,10 +6,11 @@ module Reopt.TypeInference.Header (
   parseHeader,
 ) where
 
-import Control.Monad.Except
-import Control.Monad.State
+import Control.Monad (unless, when)
+import Control.Monad.Except (Except, MonadError(throwError), runExcept)
+import Control.Monad.State (gets, modify, StateT, execStateT)
 import Data.ByteString.Char8 qualified as BSC
-import Data.Foldable
+import Data.Foldable (traverse_)
 import Data.Map.Strict qualified as Map
 import Data.Vector qualified as V
 import Language.C qualified as C

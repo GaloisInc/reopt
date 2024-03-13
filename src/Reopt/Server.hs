@@ -3,11 +3,7 @@
 module Reopt.Server (runServer, Symbol (..)) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar)
-import Control.Monad.Cont (
-  MonadIO (..),
-  MonadTrans (lift),
-  when,
- )
+import Control.Monad (when)
 import Control.Monad.Reader (
   MonadReader (ask),
   ReaderT (runReaderT),
@@ -20,11 +16,17 @@ import Control.Monad.State (
   gets,
   modify,
  )
+import Control.Monad.Trans (
+  MonadIO (..),
+  MonadTrans (lift),
+ )
 import Data.Aeson qualified as A
 import Data.Aeson.Encoding qualified as A
 import Data.Aeson.KeyMap qualified as A
+import Data.Aeson.Parser qualified as AP
 import Data.Attoparsec.ByteString qualified as AT
 import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as BSC
 import Data.ByteString.Lazy qualified as BSL
 import Data.ByteString.UTF8 qualified as UTF8
 import Data.ElfEdit qualified as Elf
@@ -35,7 +37,6 @@ import Data.Scientific qualified as Sci
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
-import Data.Text.Encoding.Base64 qualified as Base64
 import Data.Vector qualified as V
 import Data.Word (Word64)
 import System.Exit (exitFailure)
@@ -116,14 +117,10 @@ decodeWord64Field o nm = do
     Nothing -> Left $ "Expected " <> show nm <> " to be a valid Word64."
     Just x -> pure x
 
+-- NOTE (val) I modified this following the types, but I don't know how to test it still works.
+-- Beware you might get unwanted encoding artifacts.
 decodeBase64Field :: A.Object -> A.Key -> Parser BS.ByteString
-decodeBase64Field o nm = do
-  t <- decodeStringField o nm
-  -- NOTE: This may be incorrect, I was only following the types to remove a
-  -- dependency on base-encoding.
-  case Base64.decodeBase64 t of
-    Left _ -> Left "Base64 decoding failed."
-    Right r -> Right $ encodeUtf8 r
+decodeBase64Field o nm = encodeUtf8 <$> decodeStringField o nm
 
 -----------------------------------------------------------------------
 -- Server types
@@ -354,8 +351,8 @@ initialServer = do
 
 doRun :: Server -> IO ()
 doRun s = do
-  l <- BS.hGetLine stdin
-  case AT.parseOnly A.json' l >>= decode of
+  l <- BSC.hGetLine stdin
+  case AT.parseOnly AP.json' l >>= decode of
     Left msg -> do
       hPutStrLn stderr $ "Parse error: " ++ msg
       exitFailure

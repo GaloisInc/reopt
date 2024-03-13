@@ -13,10 +13,10 @@ import Control.Monad (forM_, unless, when)
 import Control.Monad.Except (
   ExceptT,
   MonadError (throwError),
-  MonadTrans (lift),
   runExceptT,
  )
 import Control.Monad.ST (ST, runST)
+import Control.Monad.Trans (MonadTrans(lift))
 import Data.Bits (Bits (shiftR))
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC

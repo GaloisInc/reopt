@@ -13,13 +13,15 @@ module Reopt.PLTParser (
   phdrContents,
 ) where
 
+import Control.Monad (
+  forM,
+  unless,
+  when,
+ )
 import Control.Monad.Except (
   Except,
   MonadError (throwError),
-  forM,
   runExcept,
-  unless,
-  when,
  )
 import Data.Bits (Bits (shiftL, shiftR, (.|.)))
 import Data.ByteString qualified as BS
