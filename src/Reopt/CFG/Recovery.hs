@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE NoStarIsType #-}
@@ -38,6 +40,7 @@ import Control.Lens (
   (^.),
   type (:~:) (Refl),
  )
+import Control.Monad (when)
 import Control.Monad.Except (
   Except,
   MonadError (..),
@@ -47,7 +50,15 @@ import Control.Monad.Reader (
   MonadReader (ask),
   ReaderT (..),
  )
-import Control.Monad.State.Strict
+import Control.Monad.State.Strict (
+  StateT(..),
+  MonadState(put, get),
+  MonadTrans(lift),
+  evalStateT,
+  gets,
+  modify',
+  modify,
+ )
 import Data.Bits (Bits ((.&.)))
 import Data.ByteString.Char8 qualified as BSC
 import Data.Foldable (Foldable (foldl', toList), foldlM, foldrM)

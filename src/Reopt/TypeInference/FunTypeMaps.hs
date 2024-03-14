@@ -21,7 +21,8 @@ module Reopt.TypeInference.FunTypeMaps (
   addNamedFunType,
 ) where
 
-import Control.Monad.State
+import Control.Monad (when)
+import Control.Monad.State (State, modify, runState)
 import Data.ByteString qualified as BS
 import Data.ByteString.UTF8 qualified as UTF8
 import Data.ElfEdit.Prim qualified as Elf

@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- |
@@ -93,7 +94,8 @@ import           Numeric.Natural (Natural)
 #endif
 import Prettyprinter qualified as PP
 import Text.LLVM qualified as L
-import Text.LLVM.PP qualified as L (ppType)
+import Text.LLVM.PP qualified as L
+import Text.LLVM.Triple.AST qualified as L
 import Text.PrettyPrint.HughesPJ qualified as HPJ
 import Text.Printf
 
@@ -153,10 +155,10 @@ llvmLogEventHeader :: [String]
 llvmLogEventHeader = ["Reopt Source Context", "LLVM Operation", "Source LLVM Type", "Destination LLVM Type"]
 
 -- | Render a log event as segments of textual info (amicable to, e.g., CSV rendering).
-llvmLogEventToStrings :: LLVMLogEvent -> [String]
+llvmLogEventToStrings :: (?config :: L.Config) => LLVMLogEvent -> [String]
 llvmLogEventToStrings e = rLogEventContext e : llvmLogInfoToStrings (rLogEventInfo e)
 
-llvmLogInfoToStrings :: LLVMLogEventInfo -> [String]
+llvmLogInfoToStrings :: (?config :: L.Config) => LLVMLogEventInfo -> [String]
 llvmLogInfoToStrings info =
   case info of
     LogInfoBitCast i -> "bitcast" : renderCastInfo i
@@ -164,6 +166,7 @@ llvmLogInfoToStrings info =
     LogInfoIntToPtr i -> "inttoptr" : renderCastInfo i
     LogInfoPtrToInt i -> "ptrtoint" : renderCastInfo i
  where
+  renderCastInfo :: LLVMBitCastInfo -> [String]
   renderCastInfo (LLVMBitCastInfo src dst) = [HPJ.render $ L.ppType src, HPJ.render $ L.ppType dst]
 
 -- | Return a LLVM type for a integer with the given width.
@@ -222,7 +225,7 @@ intrinsic' name res args attrs =
 --------------------------------------------------------------------------------
 
 -- | LLVM arithmetic with overflow intrinsic.
-overflowOp :: String -> L.Type -> Intrinsic
+overflowOp :: (?config :: L.Config) => String -> L.Type -> Intrinsic
 overflowOp bop in_typ =
   intrinsic
     ("llvm." ++ bop ++ ".with.overflow." ++ show (L.ppType in_typ))
@@ -265,7 +268,7 @@ llvmMaskedStore n tp tpv = do
    in
     intrinsic mnem (L.Vector n tpv) args
 
-llvmIntrinsics :: [Intrinsic]
+llvmIntrinsics :: (?config :: L.Config) => [Intrinsic]
 llvmIntrinsics =
   [ overflowOp bop in_typ
   | bop <- ["uadd", "sadd", "usub", "ssub"]
@@ -865,7 +868,9 @@ carryValue w x = do
 
 -- | Handle an intrinsic overflows
 intrinsicOverflows ::
-  (HasCallStack, 1 <= w) =>
+  HasCallStack =>
+  (?config :: L.Config) =>
+  1 <= w =>
   String ->
   FnValue arch (BVType w) ->
   FnValue arch (BVType w) ->
@@ -894,6 +899,7 @@ intrinsicOverflows bop x y c = bbArchConstraints $ do
 
 appToLLVM ::
   forall arch tp.
+  (?config :: L.Config) =>
   HasCallStack =>
   -- | Value being assigned
   FnAssignId ->
@@ -1171,7 +1177,7 @@ llvmGEPFromPtr pointeeType ofs ptrV = do
     zeroV = L.Typed (L.iT 32) (L.int 0)
     ofsV = L.Typed (L.iT 32) (L.int ofs)
   -- https://llvm.org/docs/GetElementPtr.html#what-is-the-first-index-of-the-gep-instruction
-  L.Typed pointerType <$> evalInstr (L.GEP False ptrV [zeroV, ofsV])
+  L.Typed pointerType <$> evalInstr (L.GEP False pointeeType ptrV [zeroV, ofsV])
 
 -- | Truncate and log.
 llvmTrunc ::
@@ -1269,6 +1275,7 @@ pointerForMemOp ctx ptr pointeeType = do
 -- | Convert an assignment to a llvm expression
 rhsToLLVM ::
   forall arch tp.
+  (?config :: L.Config) =>
   FnArchConstraints arch =>
   HasCallStack =>
   -- | Value being assigned.
@@ -1287,7 +1294,7 @@ rhsToLLVM lhs rhs =
       let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
       let typeOfResult' = tyToLLVMType ptrWidth typeOfResult
       p <- pointerForMemOp "rhsToLLVM(FnReadMem)" ptr typeOfResult'
-      v <- evalInstr (L.Load p Nothing Nothing)
+      v <- evalInstr (L.Load typeOfResult' p Nothing Nothing)
       setAssignIdValue lhs (L.Typed typeOfResult' v)
     FnCondReadMem memRepr cond ptr passthru -> do
       (loadName, eltType) <- resolveLoadNameAndType memRepr
@@ -1362,6 +1369,7 @@ bbArchConstraints m = do
 
 stmtToLLVM ::
   forall arch.
+  (?config :: L.Config) =>
   HasCallStack =>
   FnStmt arch ->
   BBLLVM arch ()
@@ -1657,6 +1665,7 @@ addPhiBinding (Some phiVar) = do
 
 addLLVMBlock ::
   forall arch.
+  (?config :: L.Config) =>
   MemWidth (ArchAddrWidth arch) =>
   -- | Context for block
   FunLLVMContext arch ->
@@ -1902,6 +1911,7 @@ getBlockAnn fnm blockRes = do
 -- functions.
 defineFunction ::
   forall arch.
+  (?config :: L.Config) =>
   (LLVMArchConstraints arch, arch ~ X86_64) =>
   ArchitectureInfo arch ->
   -- | Architecture specific operations
@@ -2062,6 +2072,7 @@ declareIntrinsic i =
 -- behavior.
 moduleForFunctions ::
   forall arch.
+  (?config :: L.Config) =>
   arch ~ X86_64 =>
   FoldableF (FnArchStmt arch) =>
   FoldableFC (ArchFn arch) =>
@@ -2109,6 +2120,15 @@ moduleForFunctions aInfo archOps genOpts recMod constraints =
         , L.modInlineAsm = []
         , L.modAliases = []
         , L.modComdat = Map.empty
+        , L.modTriple =
+            L.TargetTriple
+              { L.ttArch = L.X86_64
+              , L.ttSubArch = L.NoSubArch
+              , L.ttVendor = L.UnknownVendor
+              , L.ttOS = L.Linux
+              , L.ttEnv = L.GNU
+              , L.ttObjFmt = L.UnknownObjectFormat
+              }
         }
     annDecls = mkExternalFunctionAnn <$> recoveredDecls recMod
    in

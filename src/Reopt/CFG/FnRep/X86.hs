@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 -- | Defines the X86-specific definitions needed in the function representation.
 module Reopt.CFG.FnRep.X86 (
   X86FnStmt (..),

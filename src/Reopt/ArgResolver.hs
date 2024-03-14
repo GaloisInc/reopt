@@ -12,8 +12,8 @@ module Reopt.ArgResolver (
 import Control.Monad.Except (
   ExceptT,
   MonadError (throwError),
-  MonadIO,
  )
+import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.State (
   StateT (StateT),
   execStateT,

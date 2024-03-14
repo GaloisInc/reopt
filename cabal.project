@@ -13,7 +13,6 @@ packages:
   deps/macaw/x86
   deps/macaw/utils/compare-dwarfdump
   deps/parameterized-utils
-  deps/what4/what4
 
 haddock-html-location: https://hackage.haskell.org/package/$pkg-$version/docs
 

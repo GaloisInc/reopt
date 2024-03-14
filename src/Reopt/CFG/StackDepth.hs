@@ -19,10 +19,12 @@ import Control.Lens (
   (^.),
   type (:~:) (Refl),
  )
+import Control.Monad (
+  forM_,
+ )
 import Control.Monad.Except (
   ExceptT,
   MonadError (throwError),
-  forM_,
   runExceptT,
  )
 import Control.Monad.State.Strict (State, runState)
