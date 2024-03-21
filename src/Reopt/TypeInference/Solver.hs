@@ -140,6 +140,7 @@ compileTy (Ty ty) =
       TupleTy ts -> TupleTy <$> traverse nameTy ts
       VecTy n ty' -> VecTy n <$> nameTy ty'
       VoidTy -> pure VoidTy
+      FloatTy f -> pure (FloatTy f)
 
 --------------------------------------------------------------------------------
 -- Constraint constructors
