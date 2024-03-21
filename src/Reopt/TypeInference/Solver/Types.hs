@@ -2,8 +2,11 @@
 
 module Reopt.TypeInference.Solver.Types where
 
+import Data.Macaw.Types qualified as Macaw
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Parameterized (Some)
+import Data.Parameterized.Some (viewSome)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Prettyprinter qualified as PP
@@ -40,6 +43,7 @@ data TyF rvar f
   | -- | A known function pointer type
     FunPtrTy [f] f
   | VoidTy
+  | FloatTy (Some Macaw.FloatInfoRepr)
   deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
 
 -- | An unrolled ITy
@@ -79,6 +83,13 @@ recTyByteWidth ptrSz = offsetAfterLast . last
  where
   offsetAfterLast (o, ty) = fromIntegral o + tyByteWidth ptrSz ty
 
+floatByteWidth :: forall tp. Macaw.FloatInfoRepr tp -> Integer
+floatByteWidth Macaw.HalfFloatRepr = 2
+floatByteWidth Macaw.SingleFloatRepr = 4
+floatByteWidth Macaw.DoubleFloatRepr = 8
+floatByteWidth Macaw.QuadFloatRepr = 16
+floatByteWidth Macaw.X86_80FloatRepr = error "floatByteWidth: X86_80 not yet supported"
+
 -- | This should only be called on types which can occur within a RecTy, i.e.,
 -- not records.
 tyByteWidth :: Int -> FTy -> Integer
@@ -97,6 +108,7 @@ tyByteWidth ptrSz (FTy ty) =
     TupleTy{} -> error "Saw a TupleTy in tyByteWidth"
     VecTy{} -> error "Saw a VecTy in tyByteWidth"
     VoidTy -> error "Saw VoidTy in tyByteWidth"
+    FloatTy fi -> viewSome floatByteWidth fi
 
 recTyToLLVMType :: Int -> [(Offset, FTy)] -> L.Type
 -- This breaks recursive types.
@@ -134,6 +146,14 @@ tyToLLVMType ptrSz = go
       TupleTy ts -> L.Struct (map go ts)
       VecTy n ty' -> L.Vector (fromIntegral n) (go ty')
       VoidTy -> L.voidT
+      FloatTy tp -> L.PrimType (L.FloatType (viewSome floatTypeOf tp))
+
+floatTypeOf :: forall tp. Macaw.FloatInfoRepr tp -> L.FloatType
+floatTypeOf Macaw.HalfFloatRepr = L.Half
+floatTypeOf Macaw.SingleFloatRepr = L.Float
+floatTypeOf Macaw.DoubleFloatRepr = L.Double
+floatTypeOf Macaw.QuadFloatRepr = L.Fp128
+floatTypeOf Macaw.X86_80FloatRepr = L.X86_fp80
 
 --------------------------------------------------------------------------------
 -- Instances
@@ -162,6 +182,7 @@ instance (PP.Pretty f, PP.Pretty rv) => PP.Pretty (TyF rv f) where
     TupleTy ts -> PP.tupled (map PP.pretty ts)
     VecTy n ty -> "< " <> PP.pretty n <> " x " <> PP.pretty ty <> " >"
     VoidTy -> "void"
+    FloatTy ft -> viewSome PP.pretty ft
 
 instance PP.Pretty FTy where
   pretty = \case
@@ -193,6 +214,7 @@ instance (FreeTyVars rvar, FreeTyVars f) => FreeTyVars (TyF rvar f) where
     TupleTy ts -> foldMap freeTyVars ts
     VecTy _ ty -> freeTyVars ty
     VoidTy -> Set.empty
+    FloatTy{} -> Set.empty
 
 instance FreeTyVars ITy where
   freeTyVars = \case
@@ -229,6 +251,7 @@ instance (FreeRowVars r, FreeRowVars f) => FreeRowVars (TyF r f) where
     TupleTy ts -> foldMap freeRowVars ts
     VecTy _ ty -> freeRowVars ty
     VoidTy -> Set.empty
+    FloatTy{} -> Set.empty
 
 instance FreeRowVars TyVar where
   freeRowVars _ = Set.empty

@@ -87,6 +87,7 @@ finalizeTypeDefs = do
     TupleTy ts -> TupleTy <$> traverse lookupTyVarRep ts
     VecTy n ty -> VecTy n <$> lookupTyVarRep ty
     VoidTy -> pure VoidTy
+    FloatTy f -> pure (FloatTy f)
 
   normFieldMap :: FieldMap TyVar -> SolverM (FieldMap TyVar)
   normFieldMap = traverse lookupTyVarRep
@@ -163,6 +164,7 @@ finaliseTyF (ty, tv, _) r =
     TupleTy ts -> FTy (TupleTy (map normTy ts))
     VecTy n t -> FTy (VecTy n (normTy t))
     VoidTy -> FTy VoidTy
+    FloatTy f -> FTy (FloatTy f)
   normTy t = Map.findWithDefault UnknownTy t (csTyVars r)
 
 finaliseFieldMap ::
