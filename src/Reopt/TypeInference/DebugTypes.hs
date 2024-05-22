@@ -14,6 +14,7 @@ import Control.Monad.Except (
   MonadError (throwError),
   runExceptT,
  )
+import Control.Monad.Extra (forM)
 import Control.Monad.Trans (
   MonadTrans (lift),
  )
@@ -68,6 +69,7 @@ import Reopt.TypeInference.HeaderTypes (
   AnnType (
     DoubleAnnType,
     FloatAnnType,
+    FunPtrAnnType,
     IAnnType,
     PtrAnnType,
     VoidAnnType
@@ -118,7 +120,16 @@ resolveDwarfType ::
   ExceptT ArgResolverError (IncCompM (ReoptLogEvent w) r) AnnType
 resolveDwarfType typeMap ref = do
   tp <- resolveDwarfTypeRef typeMap ref
-  case tp of
+  resolveDwarfTypeApp typeMap ref tp
+
+resolveDwarfTypeApp ::
+  Map Dwarf.TypeRef Dwarf.AbsType ->
+  -- | Still needed for reporting errors
+  Dwarf.TypeRef ->
+  Dwarf.TypeApp ->
+  ExceptT ArgResolverError (IncCompM (ReoptLogEvent w) r) AnnType
+resolveDwarfTypeApp typeMap ref tApp =
+  case tApp of
     Dwarf.BoolType -> do
       pure $! IAnnType 1
     Dwarf.UnsignedIntType byteCount -> do
@@ -137,9 +148,24 @@ resolveDwarfType typeMap ref = do
       pure $! IAnnType 8
     Dwarf.ArrayType _ _ -> do
       throwDwarfTypeError ref "Array arguments are not supported."
-    Dwarf.PointerType _ _ -> do
-      -- We just use void pointers for now.
+    Dwarf.PointerType _ Nothing -> do
       pure $ PtrAnnType VoidAnnType
+    Dwarf.PointerType _ (Just tr) -> do
+      dty <- resolveDwarfTypeRef typeMap tr
+      -- Here we distinguish function pointers from other "regular" pointers
+      case dty of
+        Dwarf.SubroutineTypeF std -> do
+          args <- forM (Dwarf.fntypeFormals std) $ \ var -> do
+            case Dwarf.varType var of
+              Nothing -> throwDwarfTypeError ref "void in argument position is not supported."
+              Just tr' -> resolveDwarfType typeMap tr'
+          ret <- case Dwarf.fntypeType std of
+                  Nothing -> pure VoidAnnType
+                  Just retTypeRef -> resolveDwarfType typeMap retTypeRef
+          pure $ FunPtrAnnType ret args
+        _ -> do
+          ty <- resolveDwarfTypeApp typeMap tr dty
+          pure $ PtrAnnType ty
     Dwarf.StructType _ -> do
       throwDwarfTypeError ref "Struct arguments are not supported."
     Dwarf.UnionType _ -> do
