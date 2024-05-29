@@ -8,16 +8,17 @@
 -- This module provides methods for constructing functions from the basic
 -- blocks discovered by 'Data.Macaw.Discovery'.
 module Reopt.CFG.Recovery (
-  recoverFunction,
-  RecoveredFunction (..),
+  Data.Macaw.Analysis.RegisterUse.BlockInvariantMap,
+  FunctionPointerTypes,
   LLVMLogEvent (..),
+  RecoveredFunction (..),
+  RecoverError (..),
   llvmLogEventHeader,
   llvmLogEventToStrings,
-  RecoverError (..),
-  Data.Macaw.Analysis.RegisterUse.BlockInvariantMap,
+  recoverFunction,
   x86BlockInvariants,
   x86CallRegs,
-  FunctionPointerTypes,
+  x86TranslateCallType,
 
   -- * X86 type info
   X86FunTypeInfo (..),
@@ -135,6 +136,7 @@ import Reopt.Events (
   ReoptErrorTag (..),
  )
 import Reopt.Utils.Printf qualified as Printf
+import Debug.Trace (trace)
 
 -------------------------------------------------------------------------------
 --
@@ -172,7 +174,6 @@ instance HasRepr ZMMType TypeRepr where
 -- a return value is passed out.
 data X86ArgInfo where
   -- | This identifies a 64-bit value passed as a register.
-  --
   -- The register should be compatible with the ABI.
   ArgBV64 :: !F.Reg64 -> X86ArgInfo
   -- | A single double is passed into one of the ZMM registers.
@@ -1869,7 +1870,7 @@ x86CallRegs ::
 x86CallRegs mem funNameMap funTypeMap _callSite regs = do
   nm <- do
     let ipVal = regs ^. boundValue ip_reg
-    case ipVal of
+    trace ("ipVal: " <> show ipVal) $ case ipVal of
       BVValue _ val -> do
         let faddr = absoluteAddr (fromInteger val)
         callTarget <-
@@ -1895,7 +1896,9 @@ x86CallRegs mem funNameMap funTypeMap _callSite regs = do
         pure nm
       AssignedValue{} ->
         Left $ Reason IndirectCallTarget ()
-      _ -> error $ "x86CallRegs, consider: " <> show ipVal
+      _ ->
+        -- Left $ Reason IndirectCallTarget () -- FIXME: this is not why but I don't want error
+        error $ "x86CallRegs, consider: " <> show ipVal
   case funTypeMap nm of
     Just tp -> x86TranslateCallType mem nm regs tp
     Nothing -> Left $ Reason UnknownCallTargetArguments nm

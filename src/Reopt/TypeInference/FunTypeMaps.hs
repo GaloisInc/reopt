@@ -100,7 +100,7 @@ prettyMap = prettyMapExplicit PP.pretty PP.pretty
 instance MemWidth w => PP.Pretty (SymAddrMap w) where
   pretty sam =
     PP.vcat
-      ["Name map:"
+      [ "Name map:"
       , prettyMapExplicit (PP.pretty . UTF8.toString) (PP.pretty . Set.toList) (samNameMap sam)
       , "Address map:"
       , prettyMap (samAddrMap sam)

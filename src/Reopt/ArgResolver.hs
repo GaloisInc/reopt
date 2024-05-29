@@ -57,13 +57,15 @@ showArgResolverError (DebugResolveError msg) =
 showArgResolverError VarArgsUnsupported =
   "Do not support vararg functions."
 
+instance Show ArgResolverError where
+  show = showArgResolverError
+
 -- |  State monad for resolving arguments.
 data ArgResolverState = ARS
   { arsPrev :: [X86ArgInfo]
   -- ^ Arguments identified in reverse order.
   , arsNextGPP :: [F.Reg64]
-  -- ^ General purpose registers still
-  -- available for arguments.
+  -- ^ General purpose registers still available for arguments.
   , arsXMMCount :: !Word8
   -- ^ Number of xmm registers used so far.
   }
@@ -86,11 +88,12 @@ runArgResolver (ArgResolver m) =
 
 -- | Reserve a 64-bit register for an argument
 addGPReg64 :: Monad m => String -> ArgResolver m ()
-addGPReg64 nm = ArgResolver $ do
+addGPReg64 _nm = ArgResolver $ do
   regs <- gets arsNextGPP
   case regs of
     [] ->
-      throwError $ OutOfGPRegs nm
+      return () -- Temporarily ignoring other arguments when we run out of registers
+      -- throwError $ OutOfGPRegs nm
     (r : rest) -> do
       modify $ \s ->
         s
