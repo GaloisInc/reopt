@@ -109,6 +109,8 @@ import Control.Exception (
  )
 import Control.Lens ((&), (.~), (^.))
 import Control.Monad (
+  (<=<),
+  foldM,
   forM,
   forM_,
   unless,
@@ -320,7 +322,7 @@ import Reopt.TypeInference.FunTypeMaps (
   getAddrSymMap,
   symAddrMapEmpty,
   symAddrMapInsert,
-  symAddrMapLookup,
+  symAddrMapLookup, fnPtrs,
  )
 import Reopt.TypeInference.Header (parseHeader)
 import Reopt.TypeInference.HeaderTypes (
@@ -2310,52 +2312,8 @@ reoptResolveCallArgsFn mem resolveFunName resolveFunType callSite callRegs = do
     AssignedValue{} -> traceM "AssignedValue (other)"
     Initial{} -> traceM "Initial"
 
-  -- TODO: move the logic inside of x86CallRegs?
   case x86CallRegs mem resolveFunName resolveFunType callSite callRegs of
-    Left rsn -> do
-      let giveUp = Left (ppRegisterUseErrorReason rsn)
-      -- Here, we attempt to identify calls to relocations as the one to __libc_start_main.
-      -- Ideally, this would be done when creating the block.
-      case Macaw.getBoundValue X86.X86_IP callRegs of
-        AssignedValue (Macaw.assignRhs -> Macaw.ReadMem (CValue (Macaw.RelocatableCValue _ addr)) _) -> do
-          traceM ("Working on " <> show (PP.pretty addr))
-          traceM $ show $ Macaw.memSegments mem
-          case asSegmentOff mem addr of
-            Just off -> do
-              traceM $ "off is: " <> show off
-              traceM $ show (List.lookup addr (Macaw.relativeSegmentContents [segoffSegment off]))
-              case List.lookup addr (Macaw.relativeSegmentContents [segoffSegment off]) of
-                Just (Macaw.RelocationRegion r) -> do
-                  case Macaw.relocationSym r of
-                    Macaw.SymbolRelocation nm _version -> do
-                      traceM $ BSC.unpack nm
-                      traceM $ show $ resolveFunType nm
-                      case x86TranslateCallType mem nm callRegs (fromMaybe (error "sad") (resolveFunType nm)) of
-                        Right rr -> do
-                          traceM "x86TranslateCallType success: "
-                          let showCValue :: forall arch tp. Macaw.CValue arch tp -> String
-                              showCValue s = case s of
-                                Macaw.RelocatableCValue _ addr' -> ("Relocatable " :: String) <> show addr'
-                                _ -> "Something else"
-                          let showValue s = case s of
-                                Macaw.CValue cv -> showCValue cv
-                                Macaw.AssignedValue{} -> "AssignedValue"
-                                Macaw.Initial{} -> "Initial"
-                          forM_ (callArgValues rr) $ \ s -> do
-                            traceM $ viewSome showValue s
-                          -- TODO: Try to add any address found above to the exploration frontier
-                          Right (callArgValues rr)
-                        Left reason -> do
-                          traceM $ "x86TranslateCallType failure" <> Macaw.ppRegisterUseErrorReason reason
-                          giveUp
-                    _ ->
-                      trace ("relocationSym failed for " <> show off)
-                      giveUp
-                _ ->
-                  trace ("lookup failed for " <> show off)
-                  giveUp
-            Nothing -> giveUp
-        _ -> giveUp
+    Left rsn -> Left (ppRegisterUseErrorReason rsn)
     Right r -> Right (callArgValues r)
 
 -- | Infer arguments for functions that we do not already know.  Returns a pair
@@ -2425,6 +2383,7 @@ data RecoverX86Output = RecoverX86Output
   , mergeRelations :: MergeRelations
   , logEvents :: [LLVMLogEvent]
   , summaryFailures :: Map (MemSegmentOff 64) (FunctionArgAnalysisFailure 64)
+  , updatedDiscoveryState :: Macaw.DiscoveryState X86_64
   }
 
 -- | Analyze an ELF binary to extract information.
@@ -2482,6 +2441,37 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys =
   let addrUseMap = mkFunUseMap discState
 
   let mem = Macaw.memory discState
+
+  -- TODO: make this a separate function
+  let resolveFunType' fnm = Map.lookup fnm knownFunTypeMap'
+  let foldMFromOn base list op = foldM op base list
+
+  updatedDiscoveryState <-
+    foldMFromOn discState (Map.assocs (discState ^. Macaw.funInfo)) $ \ ds (_off, Some funInfo) -> do
+      foldMFromOn ds (Map.assocs (funInfo ^. Macaw.parsedBlocks)) $ \ discState' (_off, pb) -> do
+        -- If IP comes from a read of a relocatable value:
+        case Macaw.pblockTermStmt pb of
+          Macaw.ParsedCall callRegs _mRetAddr
+            | AssignedValue (Macaw.assignRhs -> Macaw.ReadMem (Macaw.RelocatableValue _ addr) _) <- Macaw.getBoundValue X86.X86_IP callRegs
+            , Just off <- asSegmentOff mem addr
+            , Just (Macaw.RelocationRegion r) <- List.lookup addr (Macaw.relativeSegmentContents [segoffSegment off])
+            , Macaw.SymbolRelocation nm _version <- Macaw.relocationSym r ->
+                case x86TranslateCallType mem nm callRegs (fromMaybe (error "sad") (resolveFunType' nm)) of
+                  Right rr ->
+                    let isPtrs = maybe (repeat False) fnPtrs (Map.lookup nm $ nameTypeMap debugTypeMap)
+                        extractAddressFromValue :: forall ids tp. Value X86_64 ids tp -> Maybe (Macaw.ArchMemAddr X86_64)
+                        extractAddressFromValue = \case
+                          Macaw.RelocatableValue _ addr' -> Just addr'
+                          _ -> Nothing
+
+                        elligible = map fst . filter snd $ zip (callArgValues rr) isPtrs
+                        addrs = mapMaybe (viewSome (asSegmentOff mem <=< extractAddressFromValue)) elligible
+                    in
+                        return $ trace ("Attempting to add addresses to frontier: " <> show addrs) (Macaw.markAddrsAsFunction Macaw.UserRequest addrs discState')
+                  Left reason -> do
+                    traceM $ "x86TranslateCallType failure" <> Macaw.ppRegisterUseErrorReason reason
+                    return discState'
+          _ -> return discState'
 
   -- TODO: Maybe we're trying to seed the mapping 0x3fd8 -> __libc_start_main here?
   forM_ (Map.assocs (Macaw.memSegmentIndexMap mem)) $ \(off, seg) -> do
@@ -2641,6 +2631,7 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys =
         , mergeRelations
         , logEvents
         , summaryFailures
+        , updatedDiscoveryState
         }
 
 {-
@@ -2790,11 +2781,12 @@ reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap firstDiscState = 
     recoverX86Output <- doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState funPtrTys
 
     let recMod = recoveredModule recoverX86Output
+    let discState' = updatedDiscoveryState recoverX86Output
 
     let moduleConstraints =
           genModuleConstraints
             recMod
-            (Macaw.memory discState)
+            (Macaw.memory discState')
             (roTraceUnification rOpts)
             (roTraceConstraintOrigins rOpts)
 
@@ -2807,7 +2799,7 @@ reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap firstDiscState = 
     -- NOTE: if we mark addresses that have already been tried (even if they
     -- have failed), Macaw will not add them to the unexplored frontier, so
     -- there is no risk here.
-    let markedDiscState = Macaw.markAddrsAsFunction Macaw.UserRequest candidateAddresses discState
+    let markedDiscState = Macaw.markAddrsAsFunction Macaw.UserRequest candidateAddresses discState'
     let unexplored = markedDiscState ^. Macaw.unexploredFunctions
 
     if null unexplored

@@ -19,6 +19,7 @@ module Reopt.TypeInference.FunTypeMaps (
   funTypeMapsEmpty,
   funTypeIsDefined,
   addNamedFunType,
+  fnPtrs,
 ) where
 
 import Control.Monad (when)
@@ -35,7 +36,8 @@ import Text.Printf (printf)
 import Data.Macaw.Discovery (NoReturnFunStatus (..))
 import Data.Macaw.Memory (MemSegmentOff, MemWidth)
 
-import Reopt.TypeInference.HeaderTypes (AnnFunType)
+import Reopt.TypeInference.HeaderTypes (AnnFunType (funArgs), AnnFunArg (funArgType), isFnPtr)
+import qualified Data.Vector as Vector
 
 ------------------------------------------------------------------------
 -- QualifiedSymbolName
@@ -191,6 +193,12 @@ instance PP.Pretty ReoptFunType where
   pretty (ReoptNonvarargFunType a) = PP.pretty a
   pretty (ReoptPrintfFunType{}) = "<type-of-printf>"
   pretty ReoptOpenFunType = "<type-of-open>"
+
+
+fnPtrs :: ReoptFunType -> [Bool]
+fnPtrs (ReoptNonvarargFunType ft) = Vector.toList $ Vector.map (isFnPtr . funArgType) (funArgs ft)
+fnPtrs _ = repeat False
+
 
 --------------------------------------------------------------------------------
 -- FunTypeMaps
