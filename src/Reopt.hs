@@ -110,7 +110,6 @@ import Control.Exception (
 import Control.Lens ((&), (.~), (^.))
 import Control.Monad (
   (<=<),
-  foldM,
   forM,
   forM_,
   unless,
@@ -227,6 +226,7 @@ import Data.Maybe (
   mapMaybe,
   maybeToList,
  )
+import Data.Either.Extra (fromRight)
 import Data.Parameterized.Some (Some (..))
 import Data.Parameterized.TraversableF (FoldableF)
 import Data.Proxy (Proxy (Proxy))
@@ -291,7 +291,8 @@ import Reopt.CFG.Recovery (
   recoverFunction,
   x86BlockInvariants,
   x86CallRegs,
-  x86TranslateCallType,
+  x86CallRegsFromName,
+  x86RegsFunName,
  )
 import Reopt.Events qualified as Events
 import Reopt.ExternalTools qualified as Ext
@@ -402,10 +403,8 @@ import Reopt.X86 (
   osPersonality,
   x86OSForABI,
  )
-import Debug.Trace (traceM, trace)
-import qualified Data.List as List
 import Data.Parameterized (type (:~:)(Refl), testEquality, viewSome)
-import qualified Data.Macaw.Analysis.RegisterUse as Macaw
+import Control.Monad.Zip (mzip)
 
 copyrightNotice :: String
 copyrightNotice = "Copyright 2014-21 Galois, Inc."
@@ -1873,9 +1872,6 @@ doDiscovery hdrAnn hdrInfo aInfo initState rDisOpt = X86.withArchConstraints aIn
       resolveDebugFunTypes resolveFn annTypeMap hdrInfo
   let postDebugState = s & Macaw.trustedFunctionEntryPoints .~ noreturnMap debugTypeMap
 
-  traceM "Debug type map is:"
-  traceM $ show $ PP.pretty debugTypeMap
-
   let symMap = getAddrSymMap symAddrMap
   discState <-
     reoptRunDiscovery symMap $
@@ -2300,18 +2296,6 @@ reoptResolveCallArgsFn ::
   (BSC.ByteString -> Maybe X86FunTypeInfo) ->
   ResolveCallArgsFn X86_64
 reoptResolveCallArgsFn mem resolveFunName resolveFunType callSite callRegs = do
-  traceM "Call site:"
-  traceM $ show callSite
-  traceM "Call regs:"
-  traceM $ show callRegs
-
-  case Macaw.getBoundValue X86.X86_IP callRegs of
-    CValue{} -> traceM "CValue"
-    AssignedValue (Macaw.assignRhs -> Macaw.ReadMem (CValue (Macaw.RelocatableCValue _ addr)) _) -> traceM (show (PP.pretty addr))
-    AssignedValue (Macaw.assignRhs -> Macaw.ReadMem addr _) -> traceM ("???" <> show (PP.pretty addr))
-    AssignedValue{} -> traceM "AssignedValue (other)"
-    Initial{} -> traceM "Initial"
-
   case x86CallRegs mem resolveFunName resolveFunType callSite callRegs of
     Left rsn -> Left (ppRegisterUseErrorReason rsn)
     Right r -> Right (callArgValues r)
@@ -2324,7 +2308,6 @@ x86ArgumentAnalysis ::
   -- | Map from addresses to function name.
   (MemSegmentOff 64 -> Maybe BSC.ByteString) ->
   -- | Map from address to the name at that address along with type
-  Map BSC.ByteString (MemSegmentOff 64, X86FunTypeInfo) ->
   Map BSC.ByteString X86FunTypeInfo ->
   Macaw.DiscoveryState X86_64 ->
   ReoptM
@@ -2333,15 +2316,8 @@ x86ArgumentAnalysis ::
     ( Map (MemSegmentOff 64) X86FunTypeInfo
     , Map (MemSegmentOff 64) (FunctionArgAnalysisFailure 64)
     )
-x86ArgumentAnalysis sysp resolveFunName funTypeMap funTypeMap' discState = do
-
-  traceM "The funtype we resolve from is:"
-  forM_ (Map.assocs funTypeMap) $ \ (k, v) -> do
-    traceM $ "Entry " <> show k <> " ↦ " <> show v
-  traceM $ "Number of entries: " <> show (length $ Map.assocs funTypeMap)
-
-  -- let resolveFunType fnm = snd <$> Map.lookup fnm funTypeMap
-  let resolveFunType fnm = Map.lookup fnm funTypeMap'
+x86ArgumentAnalysis sysp resolveFunName funTypeMap discState = do
+  let resolveFunType fnm = Map.lookup fnm funTypeMap
 
   -- Generate map from symbol names to known type.
   let mem = Macaw.memory discState
@@ -2398,86 +2374,41 @@ doRecoverX86 ::
   ReoptM X86_64 r RecoverX86Output
 doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys = do
 
-  let resolveX86Type' :: BS.ByteString -> ReoptFunType -> Maybe X86FunTypeInfo
-      resolveX86Type' nm rtp = do
-        traceM $ "Resolving " <> BSC.unpack nm
+  let resolveX86Type :: ReoptFunType -> Maybe X86FunTypeInfo
+      resolveX86Type rtp = do
         case runExcept (resolveReoptFunType rtp) of
           Right r -> Just r
-          Left l -> trace (show l) Nothing
+          Left _l ->  Nothing
 
-  let resolveX86Type :: BS.ByteString -> ReoptFunType -> Maybe (MemSegmentOff 64, X86FunTypeInfo)
-      resolveX86Type nm rtp = do
-        traceM $ "Resolving " <> BSC.unpack nm
-        case runExcept (resolveReoptFunType rtp) of
-          Right r ->
-            case Set.toList (Map.findWithDefault Set.empty nm (samNameMap symAddrMap)) of
-              [addr] -> Just (addr, r)
-              _ -> trace "TODO1" Nothing
-          Left l -> trace (show l) Nothing
+  let resolveX86Addr :: BS.ByteString -> Maybe (MemSegmentOff 64)
+      resolveX86Addr nm = do
+        case Set.toList (Map.findWithDefault Set.empty nm (samNameMap symAddrMap)) of
+          [addr] -> Just addr
+          _ -> Nothing
 
+  let
+    knownNamesToType :: Map BS.ByteString ReoptFunType
+    knownNamesToType =
+        nameTypeMap debugTypeMap
+        <> Map.fromList
+          [ (recoveredFunctionName symAddrMap unnamedFunPrefix addr, rtp)
+          | (addr, rtp) <- Map.toList (addrTypeMap debugTypeMap)
+          ]
+
+  -- Map BS.ByteString ReoptFunType -> Map BS.ByteString X86FunTypeInfo
   -- Map names to known function types when we have explicit information.
   let
-    knownFunTypeMap' :: Map BS.ByteString X86FunTypeInfo
-    knownFunTypeMap' =
-      Map.fromList
-        [ (recoveredFunctionName symAddrMap unnamedFunPrefix addr, xtp)
-        | (addr, rtp) <- Map.toList (addrTypeMap debugTypeMap)
-        , Right xtp <- [runExcept (resolveReoptFunType rtp)]
-        ]
-        <> Map.mapMaybeWithKey resolveX86Type' (nameTypeMap debugTypeMap)
+    knownFunTypeMap :: Map BS.ByteString X86FunTypeInfo
+    knownFunTypeMap = Map.mapMaybe resolveX86Type knownNamesToType
 
-  -- Map names to known function types when we have explicit information.
   let
-    knownFunTypeMap :: Map BS.ByteString (MemSegmentOff 64, X86FunTypeInfo)
-    knownFunTypeMap =
-      Map.fromList
-        [ (recoveredFunctionName symAddrMap unnamedFunPrefix addr, (addr, xtp))
-        | (addr, rtp) <- Map.toList (addrTypeMap debugTypeMap)
-        , Right xtp <- [runExcept (resolveReoptFunType rtp)]
-        ]
-        <> Map.mapMaybeWithKey resolveX86Type (nameTypeMap debugTypeMap)
+    knownFunAddrMap :: Map BS.ByteString (MemSegmentOff 64)
+    knownFunAddrMap = Map.mapMaybeWithKey (\k _ -> resolveX86Addr k) knownNamesToType
 
   -- Used to compute sizes of functions for overwriting purposes.
   let addrUseMap = mkFunUseMap discState
 
   let mem = Macaw.memory discState
-
-  -- TODO: make this a separate function
-  let resolveFunType' fnm = Map.lookup fnm knownFunTypeMap'
-  let foldMFromOn base list op = foldM op base list
-
-  updatedDiscoveryState <-
-    foldMFromOn discState (Map.assocs (discState ^. Macaw.funInfo)) $ \ ds (_off, Some funInfo) -> do
-      foldMFromOn ds (Map.assocs (funInfo ^. Macaw.parsedBlocks)) $ \ discState' (_off, pb) -> do
-        -- If IP comes from a read of a relocatable value:
-        case Macaw.pblockTermStmt pb of
-          Macaw.ParsedCall callRegs _mRetAddr
-            | AssignedValue (Macaw.assignRhs -> Macaw.ReadMem (Macaw.RelocatableValue _ addr) _) <- Macaw.getBoundValue X86.X86_IP callRegs
-            , Just off <- asSegmentOff mem addr
-            , Just (Macaw.RelocationRegion r) <- List.lookup addr (Macaw.relativeSegmentContents [segoffSegment off])
-            , Macaw.SymbolRelocation nm _version <- Macaw.relocationSym r ->
-                case x86TranslateCallType mem nm callRegs (fromMaybe (error "sad") (resolveFunType' nm)) of
-                  Right rr ->
-                    let isPtrs = maybe (repeat False) fnPtrs (Map.lookup nm $ nameTypeMap debugTypeMap)
-                        extractAddressFromValue :: forall ids tp. Value X86_64 ids tp -> Maybe (Macaw.ArchMemAddr X86_64)
-                        extractAddressFromValue = \case
-                          Macaw.RelocatableValue _ addr' -> Just addr'
-                          _ -> Nothing
-
-                        elligible = map fst . filter snd $ zip (callArgValues rr) isPtrs
-                        addrs = mapMaybe (viewSome (asSegmentOff mem <=< extractAddressFromValue)) elligible
-                    in
-                        return $ trace ("Attempting to add addresses to frontier: " <> show addrs) (Macaw.markAddrsAsFunction Macaw.UserRequest addrs discState')
-                  Left reason -> do
-                    traceM $ "x86TranslateCallType failure" <> Macaw.ppRegisterUseErrorReason reason
-                    return discState'
-          _ -> return discState'
-
-  -- TODO: Maybe we're trying to seed the mapping 0x3fd8 -> __libc_start_main here?
-  forM_ (Map.assocs (Macaw.memSegmentIndexMap mem)) $ \(off, seg) -> do
-    traceM (show off)
-    traceM (show seg)
-    traceM (show (Macaw.relativeSegmentContents [seg]))
 
   -- Maps address to name of function to use.
   let
@@ -2496,6 +2427,10 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys =
                   Nothing -> nosymFunctionName unnamedFunPrefix addr
           ]
 
+  -- TODO: make this a separate function
+  let foldFromOn base list op = foldr op base list
+
+
   -- COMMENT OUT TO INSPECT CODE AS OBTAINED FROM MACAW
   -- let explFuns = Macaw.exploredFunctions discState
   -- error $ show $ viewSome PP.pretty <$> explFuns
@@ -2503,23 +2438,27 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys =
   -- Infer registers each function demands.
   (fDems, summaryFailures) <- do
     let resolveFunName a = Map.lookup a funNameMap
-    x86ArgumentAnalysis sysp resolveFunName knownFunTypeMap knownFunTypeMap' discState
+    x86ArgumentAnalysis sysp resolveFunName knownFunTypeMap discState
 
   let
-    funTypeMap :: Map BS.ByteString (MemSegmentOff 64, X86FunTypeInfo)
-    funTypeMap =
-      knownFunTypeMap
-        <> Map.fromList
-          [ (nm, (faddr, tp))
-          | Some finfo <- Macaw.exploredFunctions discState
-          , let faddr = Macaw.discoveredFunAddr finfo
-          , let nm = Map.findWithDefault (error "Address undefined in funNameMap") faddr funNameMap
-          , tp <- maybeToList $ Map.lookup faddr fDems
-          ]
+    newTypeMaps :: (Map BS.ByteString X86FunTypeInfo, Map BS.ByteString (MemSegmentOff 64))
+    newTypeMaps = case unzip [ ((nm, tp), (nm, faddr))
+                    | Some finfo <- Macaw.exploredFunctions discState
+                    , let faddr = Macaw.discoveredFunAddr finfo
+                    , let nm = Map.findWithDefault (error "Address undefined in funNameMap") faddr funNameMap
+                    , tp <- maybeToList $ Map.lookup faddr fDems
+                    ]
+                  of
+                    (fType, fAddr) -> (Map.fromList fType, Map.fromList fAddr)
 
+
+  let funTypeMap = fst newTypeMaps <> knownFunTypeMap
+  let funAddrMap = snd newTypeMaps <> knownFunAddrMap
+
+  let resolveFunName a = Map.lookup a funNameMap
+  let resolveFunType fnm = Map.lookup fnm funTypeMap
   fnDefsAndLogEvents <- fmap catMaybes $
     forM (Macaw.exploredFunctions discState) $ \(Some finfo) -> do
-      traceM $ show $ PP.pretty finfo
       let faddr = Macaw.discoveredFunAddr finfo
       let dnm = Macaw.discoveredFunSymbol finfo
       let fnId = Events.funId faddr dnm
@@ -2527,7 +2466,7 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys =
       let abandonBecause reason = do
             funStepInfo Events.Discovery ("Abandoning " <> BSC.unpack nm <> " because " <> reason)
             return Nothing
-      case snd <$> Map.lookup nm funTypeMap of
+      case Map.lookup nm funTypeMap of
         Nothing -> do
           -- TODO: Check an error has already been reported on this.
           abandonBecause "we don't know its type"
@@ -2545,8 +2484,6 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys =
               abandonBecause "the function has a PLT"
             FunctionOK -> do
               funStepStarted Events.InvariantInference fnId
-              let resolveFunName a = Map.lookup a funNameMap
-              let resolveFunType fnm = snd <$> Map.lookup fnm funTypeMap
               case x86BlockInvariants sysp mem resolveFunName resolveFunType finfo retRegs of
                 Left e -> do
                   funStepFailed Events.InvariantInference fnId e
@@ -2562,6 +2499,27 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys =
                     Right fn -> do
                       funStepFinished Events.Recovery fnId ()
                       pure (Just fn)
+
+  let updatedDiscoveryState =
+          foldFromOn discState (Map.assocs (discState ^. Macaw.funInfo)) $ \ (_off, Some funInfo) ds ->
+            foldFromOn ds (Map.assocs (funInfo ^. Macaw.parsedBlocks)) $ \ (_off, pb) discState'  ->
+                -- If IP comes from a read of a relocatable value:
+                fromRight discState' $ case Macaw.pblockTermStmt pb of
+                  Macaw.ParsedCall callRegs _mRetAddr -> do
+                      nm <- x86RegsFunName mem resolveFunName callRegs
+                      rr <- x86CallRegsFromName mem  nm resolveFunType callRegs
+                      let isPtrs = fromMaybe (repeat False) (fnPtrs =<< Map.lookup nm (nameTypeMap debugTypeMap))
+
+                      let extractAddressFromValue :: forall ids tp. Value X86_64 ids tp -> Maybe (Macaw.ArchMemAddr X86_64)
+                          extractAddressFromValue = \case
+                            Macaw.RelocatableValue _ addr' -> Just addr'
+                            _ -> Nothing
+
+                      let elligible = map fst . filter snd $ zip (callArgValues rr) isPtrs
+                      let addrs = mapMaybe (viewSome (asSegmentOff mem <=< extractAddressFromValue)) elligible
+                      return $ Macaw.markAddrsAsFunction Macaw.UserRequest addrs discState'
+
+                  _ -> return discState'
   let
     fnDefs = map recoveredFunction fnDefsAndLogEvents
     logEvents = concatMap llvmLogEvents fnDefsAndLogEvents
@@ -2588,7 +2546,7 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys =
                 Macaw.NoReturnFun -> True
           }
         | (nm, _) <- Map.toList declFunTypeMap
-        , (addr, tp) <- maybeToList $ Map.lookup nm funTypeMap
+        , (addr, tp) <- maybeToList $ mzip (Map.lookup nm funAddrMap) (Map.lookup nm funTypeMap)
         , let noRet = Map.findWithDefault Macaw.MayReturnFun addr (discState ^. Macaw.trustedFunctionEntryPoints)
         ]
 
@@ -2773,7 +2731,6 @@ reoptRecoveryLoop ::
     , ModuleConstraints X86_64
     )
 reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap firstDiscState = do
-  traceM $ show $ Macaw.ppDiscoveryStateBlocks firstDiscState
   checkNoSymbolUsesReservedPrefix funPrefix symAddrMap
   go Map.empty firstDiscState
  where

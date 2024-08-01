@@ -18,6 +18,8 @@ module Reopt.CFG.Recovery (
   recoverFunction,
   x86BlockInvariants,
   x86CallRegs,
+  x86CallRegsFromName,
+  x86RegsFunName,
   x86TranslateCallType,
 
   -- * X86 type info
@@ -136,7 +138,6 @@ import Reopt.Events (
   ReoptErrorTag (..),
  )
 import Reopt.Utils.Printf qualified as Printf
-import Debug.Trace (trace)
 
 -------------------------------------------------------------------------------
 --
@@ -1853,6 +1854,64 @@ x86TranslateCallType _mem nm regs x86Ftp@X86OpenFunType = do
       , callReturnRegs = [Some (X86_GP F.RAX)]
       }
 
+-- | Try to find the name of the function at a given start address
+x86RegsFunName ::
+  forall ids.
+  Memory 64 ->
+  -- | Maps start address of function to the function name.
+  (MemSegmentOff 64 -> Maybe BSC.ByteString) ->
+  -- | Address of the call statement.
+  RegState X86Reg (Value X86_64 ids) ->
+  Either RegisterUseErrorReason BSC.ByteString
+x86RegsFunName mem funNameMap regs = do
+    let ipVal = regs ^. boundValue ip_reg
+
+    let tryGetCallAddr faddr = case asSegmentOff mem faddr of
+            Just r -> pure r
+            Nothing -> Left $ Reason InvalidCallTargetAddress (memWordValue (addrOffset faddr))
+
+    let tryLookupFunName callTarget faddr = case funNameMap callTarget of
+            Just r -> pure r
+            Nothing -> Left $ Reason CallTargetNotFunctionEntryPoint (memWordValue (addrOffset faddr))
+
+    case ipVal of
+      BVValue _ val -> do
+        let faddr = absoluteAddr (fromInteger val)
+        callTarget <- tryGetCallAddr faddr
+        tryLookupFunName callTarget faddr 
+      RelocatableValue _ faddr -> do
+        callTarget <- tryGetCallAddr faddr
+        tryLookupFunName callTarget faddr 
+      SymbolValue _ (SymbolRelocation nm _ver) -> do
+        pure nm
+      AssignedValue (assignRhs -> ReadMem (RelocatableValue _ memVal) _) -> do
+        callTargetPtr <- tryGetCallAddr memVal
+        case lookup memVal (relativeSegmentContents [segoffSegment callTargetPtr]) of
+            Just (RelocationRegion r)
+              | SymbolRelocation nm _version <- relocationSym r -> do
+                pure nm
+            _ -> Left $ Reason IndirectCallTarget ()
+        
+      AssignedValue{} ->
+        Left $ Reason IndirectCallTarget ()
+      _ ->
+        error $ "x86CallRegs, consider: " <> show ipVal
+
+-- | Compute dependencies of the given a function name
+x86CallRegsFromName ::
+  forall ids.
+  Memory 64 ->
+  BSC.ByteString ->
+  -- | Maps start address of function to the function name.
+  (BSC.ByteString -> Maybe X86FunTypeInfo) ->
+  -- | Registers when call occurs.
+  RegState X86Reg (Value X86_64 ids) ->
+  Either RegisterUseErrorReason (CallRegs X86_64 ids)
+x86CallRegsFromName mem nm funTypeMap regs = 
+  case funTypeMap nm of
+    Just tp -> x86TranslateCallType mem nm regs tp
+    Nothing -> Left $ Reason UnknownCallTargetArguments nm
+
 -- | Compute map from block starting addresses to the dependencies required to
 -- run block.
 x86CallRegs ::
@@ -1868,40 +1927,9 @@ x86CallRegs ::
   RegState X86Reg (Value X86_64 ids) ->
   Either RegisterUseErrorReason (CallRegs X86_64 ids)
 x86CallRegs mem funNameMap funTypeMap _callSite regs = do
-  nm <- do
-    let ipVal = regs ^. boundValue ip_reg
-    trace ("ipVal: " <> show ipVal) $ case ipVal of
-      BVValue _ val -> do
-        let faddr = absoluteAddr (fromInteger val)
-        callTarget <-
-          case asSegmentOff mem faddr of
-            Just r -> pure r
-            Nothing -> Left $ Reason InvalidCallTargetAddress (memWordValue (addrOffset faddr))
-        case funNameMap callTarget of
-          Just r ->
-            Right r
-          Nothing ->
-            Left $ Reason CallTargetNotFunctionEntryPoint (memWordValue (addrOffset faddr))
-      RelocatableValue _ faddr -> do
-        callTarget <-
-          case asSegmentOff mem faddr of
-            Just r -> pure r
-            Nothing -> Left $ Reason InvalidCallTargetAddress (memWordValue (addrOffset faddr))
-        case funNameMap callTarget of
-          Just r ->
-            Right r
-          Nothing ->
-            Left $ Reason CallTargetNotFunctionEntryPoint (memWordValue (addrOffset faddr))
-      SymbolValue _ (SymbolRelocation nm _ver) -> do
-        pure nm
-      AssignedValue{} ->
-        Left $ Reason IndirectCallTarget ()
-      _ ->
-        -- Left $ Reason IndirectCallTarget () -- FIXME: this is not why but I don't want error
-        error $ "x86CallRegs, consider: " <> show ipVal
-  case funTypeMap nm of
-    Just tp -> x86TranslateCallType mem nm regs tp
-    Nothing -> Left $ Reason UnknownCallTargetArguments nm
+  nm <- x86RegsFunName mem funNameMap regs
+  x86CallRegsFromName mem nm funTypeMap regs
+
 
 uninitRegs :: [Pair X86Reg (FnRegValue X86_64)]
 uninitRegs =

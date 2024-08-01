@@ -195,9 +195,9 @@ instance PP.Pretty ReoptFunType where
   pretty ReoptOpenFunType = "<type-of-open>"
 
 
-fnPtrs :: ReoptFunType -> [Bool]
-fnPtrs (ReoptNonvarargFunType ft) = Vector.toList $ Vector.map (isFnPtr . funArgType) (funArgs ft)
-fnPtrs _ = repeat False
+fnPtrs :: ReoptFunType -> Maybe [Bool]
+fnPtrs (ReoptNonvarargFunType ft) = Just $ Vector.toList $ Vector.map (isFnPtr . funArgType) (funArgs ft)
+fnPtrs _ = Nothing
 
 
 --------------------------------------------------------------------------------
