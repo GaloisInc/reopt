@@ -109,7 +109,6 @@ import Control.Exception (
  )
 import Control.Lens ((&), (.~), (^.))
 import Control.Monad (
-  (<=<),
   forM,
   forM_,
   unless,
@@ -2507,16 +2506,18 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys =
                 fromRight discState' $ case Macaw.pblockTermStmt pb of
                   Macaw.ParsedCall callRegs _mRetAddr -> do
                       nm <- x86RegsFunName mem resolveFunName callRegs
-                      rr <- x86CallRegsFromName mem  nm resolveFunType callRegs
+                      rr <- x86CallRegsFromName mem nm resolveFunType callRegs
                       let isPtrs = fromMaybe (repeat False) (fnPtrs =<< Map.lookup nm (nameTypeMap debugTypeMap))
 
-                      let extractAddressFromValue :: forall ids tp. Value X86_64 ids tp -> Maybe (Macaw.ArchMemAddr X86_64)
+                      let extractAddressFromValue :: forall ids tp. Value X86_64 ids tp -> Maybe (Macaw.MemSegmentOff 64)
                           extractAddressFromValue = \case
-                            Macaw.RelocatableValue _ addr' -> Just addr'
+                            Macaw.RelocatableValue _ addr' -> asSegmentOff mem addr'
+                            Macaw.BVValue _ addr' -> let addrWord = Macaw.memWord (fromInteger addr')
+                                                     in resolveAbsoluteAddr mem addrWord
                             _ -> Nothing
 
                       let elligible = map fst . filter snd $ zip (callArgValues rr) isPtrs
-                      let addrs = mapMaybe (viewSome (asSegmentOff mem <=< extractAddressFromValue)) elligible
+                      let addrs = mapMaybe (viewSome extractAddressFromValue) elligible
                       return $ Macaw.markAddrsAsFunction Macaw.UserRequest addrs discState'
 
                   _ -> return discState'
