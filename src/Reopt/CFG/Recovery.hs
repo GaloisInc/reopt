@@ -1878,10 +1878,10 @@ x86RegsFunName mem funNameMap regs = do
       BVValue _ val -> do
         let faddr = absoluteAddr (fromInteger val)
         callTarget <- tryGetCallAddr faddr
-        tryLookupFunName callTarget faddr 
+        tryLookupFunName callTarget faddr
       RelocatableValue _ faddr -> do
         callTarget <- tryGetCallAddr faddr
-        tryLookupFunName callTarget faddr 
+        tryLookupFunName callTarget faddr
       SymbolValue _ (SymbolRelocation nm _ver) -> do
         pure nm
       AssignedValue (assignRhs -> ReadMem (RelocatableValue _ memVal) _) -> do
@@ -1891,11 +1891,11 @@ x86RegsFunName mem funNameMap regs = do
               | SymbolRelocation nm _version <- relocationSym r -> do
                 pure nm
             _ -> Left $ Reason IndirectCallTarget ()
-        
+
       AssignedValue{} ->
         Left $ Reason IndirectCallTarget ()
       _ ->
-        error $ "x86CallRegs, consider: " <> show ipVal
+        error $ "Unhandled symbolic program counter pattern in x86CallRegs, consider: " <> show ipVal
 
 -- | Compute dependencies of the given a function name
 x86CallRegsFromName ::
@@ -1907,7 +1907,7 @@ x86CallRegsFromName ::
   -- | Registers when call occurs.
   RegState X86Reg (Value X86_64 ids) ->
   Either RegisterUseErrorReason (CallRegs X86_64 ids)
-x86CallRegsFromName mem nm funTypeMap regs = 
+x86CallRegsFromName mem nm funTypeMap regs =
   case funTypeMap nm of
     Just tp -> x86TranslateCallType mem nm regs tp
     Nothing -> Left $ Reason UnknownCallTargetArguments nm

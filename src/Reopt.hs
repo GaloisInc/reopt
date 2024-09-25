@@ -134,6 +134,7 @@ import Control.Monad.Trans (
   MonadIO (liftIO),
   MonadTrans (lift),
  )
+import Control.Monad.Zip (mzip)
 import Data.Bits (
   Bits (popCount, shiftR, (.&.), (.|.)),
   FiniteBits (finiteBitSize),
@@ -226,6 +227,7 @@ import Data.Maybe (
   maybeToList,
  )
 import Data.Either.Extra (fromRight)
+import Data.Parameterized (type (:~:)(Refl), testEquality, viewSome)
 import Data.Parameterized.Some (Some (..))
 import Data.Parameterized.TraversableF (FoldableF)
 import Data.Proxy (Proxy (Proxy))
@@ -318,11 +320,12 @@ import Reopt.TypeInference.FunTypeMaps (
   ReoptFunType (..),
   SymAddrMap (samAddrMap, samNameMap),
   SymAddrMapLookupError (SymAddrMapAmbiguous, SymAddrMapNotFound),
+  isFunctionWithFunctionPointerArgs,
   funTypeMapsEmpty,
   getAddrSymMap,
   symAddrMapEmpty,
   symAddrMapInsert,
-  symAddrMapLookup, fnPtrs,
+  symAddrMapLookup,
  )
 import Reopt.TypeInference.Header (parseHeader)
 import Reopt.TypeInference.HeaderTypes (
@@ -402,8 +405,6 @@ import Reopt.X86 (
   osPersonality,
   x86OSForABI,
  )
-import Data.Parameterized (type (:~:)(Refl), testEquality, viewSome)
-import Control.Monad.Zip (mzip)
 
 copyrightNotice :: String
 copyrightNotice = "Copyright 2014-21 Galois, Inc."
@@ -1445,10 +1446,7 @@ discoverFunDebugInfo ::
   ArchitectureInfo arch ->
   Memory (Macaw.ArchAddrWidth arch) ->
   MemAddr (Macaw.ArchAddrWidth arch) ->
-  ReoptM
-    arch
-    r
-    (FunTypeMaps (Macaw.ArchAddrWidth arch))
+  ReoptM arch r (FunTypeMaps (Macaw.ArchAddrWidth arch))
 discoverFunDebugInfo hdrInfo aInfo mem baseAddr = X86.withArchConstraints aInfo $ do
   let resolveFn _symName off =
         let addr = incAddr (toInteger off) baseAddr
@@ -2426,10 +2424,6 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys =
                   Nothing -> nosymFunctionName unnamedFunPrefix addr
           ]
 
-  -- TODO: make this a separate function
-  let foldFromOn base list op = foldr op base list
-
-
   -- COMMENT OUT TO INSPECT CODE AS OBTAINED FROM MACAW
   -- let explFuns = Macaw.exploredFunctions discState
   -- error $ show $ viewSome PP.pretty <$> explFuns
@@ -2499,28 +2493,34 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys =
                       funStepFinished Events.Recovery fnId ()
                       pure (Just fn)
 
+  let foldFromOn base list op = foldr op base list
   let updatedDiscoveryState =
-          foldFromOn discState (Map.assocs (discState ^. Macaw.funInfo)) $ \ (_off, Some funInfo) ds ->
-            foldFromOn ds (Map.assocs (funInfo ^. Macaw.parsedBlocks)) $ \ (_off, pb) discState'  ->
-                -- If IP comes from a read of a relocatable value:
-                fromRight discState' $ case Macaw.pblockTermStmt pb of
-                  Macaw.ParsedCall callRegs _mRetAddr -> do
-                      nm <- x86RegsFunName mem resolveFunName callRegs
-                      rr <- x86CallRegsFromName mem nm resolveFunType callRegs
-                      let isPtrs = fromMaybe (repeat False) (fnPtrs =<< Map.lookup nm (nameTypeMap debugTypeMap))
+        foldFromOn discState (Map.assocs (discState ^. Macaw.funInfo)) $ \ (_off, Some funInfo) ds ->
+          foldFromOn ds (Map.assocs (funInfo ^. Macaw.parsedBlocks)) $ \ (_off, pb) discState'  ->
+              -- If IP comes from a read of a relocatable value:
+              fromRight discState' $ case Macaw.pblockTermStmt pb of
+                Macaw.ParsedCall callRegs _mRetAddr -> do
+                    nm <- x86RegsFunName mem resolveFunName callRegs
+                    rr <- x86CallRegsFromName mem nm resolveFunType callRegs
 
-                      let extractAddressFromValue :: forall ids tp. Value X86_64 ids tp -> Maybe (Macaw.MemSegmentOff 64)
-                          extractAddressFromValue = \case
-                            Macaw.RelocatableValue _ addr' -> asSegmentOff mem addr'
-                            Macaw.BVValue _ addr' -> let addrWord = Macaw.memWord (fromInteger addr')
-                                                     in resolveAbsoluteAddr mem addrWord
-                            _ -> Nothing
+                    -- Figure out which arguments we expect to be function pointers
+                    let expectedFnPtrsByPosition =
+                          fromMaybe
+                            (repeat False)
+                            (isFunctionWithFunctionPointerArgs =<< Map.lookup nm (nameTypeMap debugTypeMap))
 
-                      let elligible = map fst . filter snd $ zip (callArgValues rr) isPtrs
-                      let addrs = mapMaybe (viewSome extractAddressFromValue) elligible
-                      return $ Macaw.markAddrsAsFunction Macaw.UserRequest addrs discState'
+                    let extractAddressFromValue :: forall ids tp. Value X86_64 ids tp -> Maybe (Macaw.MemSegmentOff 64)
+                        extractAddressFromValue = \case
+                          Macaw.RelocatableValue _ addr' -> asSegmentOff mem addr'
+                          Macaw.BVValue _ addr' -> let addrWord = Macaw.memWord (fromInteger addr')
+                                                   in resolveAbsoluteAddr mem addrWord
+                          _ -> Nothing
 
-                  _ -> return discState'
+                    let eligible = map fst . filter snd $ zip (callArgValues rr) expectedFnPtrsByPosition
+                    let addrs = mapMaybe (viewSome extractAddressFromValue) eligible
+                    return $ Macaw.markAddrsAsFunction Macaw.UserRequest addrs discState'
+
+                _ -> return discState'
   let
     fnDefs = map recoveredFunction fnDefsAndLogEvents
     logEvents = concatMap llvmLogEvents fnDefsAndLogEvents

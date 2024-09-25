@@ -88,12 +88,13 @@ runArgResolver (ArgResolver m) =
 
 -- | Reserve a 64-bit register for an argument
 addGPReg64 :: Monad m => String -> ArgResolver m ()
-addGPReg64 _nm = ArgResolver $ do
+addGPReg64 nm = ArgResolver $ do
   regs <- gets arsNextGPP
   case regs of
     [] ->
-      return () -- Temporarily ignoring other arguments when we run out of registers
-      -- throwError $ OutOfGPRegs nm
+      -- NOTE: This is a known limitation of current Reopt, see:
+      -- https://github.com/GaloisInc/reopt/issues/313
+      throwError $ OutOfGPRegs nm
     (r : rest) -> do
       modify $ \s ->
         s

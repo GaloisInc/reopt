@@ -19,7 +19,7 @@ module Reopt.TypeInference.FunTypeMaps (
   funTypeMapsEmpty,
   funTypeIsDefined,
   addNamedFunType,
-  fnPtrs,
+  isFunctionWithFunctionPointerArgs,
 ) where
 
 import Control.Monad (when)
@@ -195,9 +195,12 @@ instance PP.Pretty ReoptFunType where
   pretty ReoptOpenFunType = "<type-of-open>"
 
 
-fnPtrs :: ReoptFunType -> Maybe [Bool]
-fnPtrs (ReoptNonvarargFunType ft) = Just $ Vector.toList $ Vector.map (isFnPtr . funArgType) (funArgs ft)
-fnPtrs _ = Nothing
+-- | Returns `Just` with a positional list of which arguments are expected to be function pointers
+-- if this is a function.  Otherwise, `Nothing`.
+isFunctionWithFunctionPointerArgs :: ReoptFunType -> Maybe [Bool]
+isFunctionWithFunctionPointerArgs (ReoptNonvarargFunType ft) =
+  Just $ Vector.toList $ Vector.map (isFnPtr . funArgType) (funArgs ft)
+isFunctionWithFunctionPointerArgs _ = Nothing
 
 
 --------------------------------------------------------------------------------

@@ -33,7 +33,8 @@ import Text.Printf (printf)
 import Data.Macaw.CFG (
   ArchAddrWidth,
   ArchSegmentOff,
-  MemSegmentOff, MemWidth,
+  MemSegmentOff,
+  MemWidth,
  )
 import Data.Macaw.Discovery (
   NoReturnFunStatus (MayReturnFun, NoReturnFun),
@@ -345,9 +346,6 @@ resolveSubprogramType cu annMap sub entryAddr
                   reoptTypeWarning $ printf "Type error on %s: %s" debugName (showArgResolverError e)
                   pure annMap
                 Right funType -> do
-                  -- traceM $ "addNamedFunType: " <> debugName <> " at addr " <> show entryAddr
-                  -- traceM $ "with type " <> show funType
-                  -- traceM $ "with external name " <> show externalName
                   let (m, warnings) = addNamedFunType annMap debugName externalName entryAddr (ReoptNonvarargFunType funType)
                   mapM_ reoptTypeWarning warnings
                   pure m
