@@ -19,6 +19,7 @@ module Reopt.TypeInference.FunTypeMaps (
   funTypeMapsEmpty,
   funTypeIsDefined,
   addNamedFunType,
+  isFunctionWithFunctionPointerArgs,
 ) where
 
 import Control.Monad (when)
@@ -35,7 +36,8 @@ import Text.Printf (printf)
 import Data.Macaw.Discovery (NoReturnFunStatus (..))
 import Data.Macaw.Memory (MemSegmentOff, MemWidth)
 
-import Reopt.TypeInference.HeaderTypes (AnnFunType)
+import Reopt.TypeInference.HeaderTypes (AnnFunType (funArgs), AnnFunArg (funArgType), isFnPtr)
+import qualified Data.Vector as Vector
 
 ------------------------------------------------------------------------
 -- QualifiedSymbolName
@@ -100,7 +102,7 @@ prettyMap = prettyMapExplicit PP.pretty PP.pretty
 instance MemWidth w => PP.Pretty (SymAddrMap w) where
   pretty sam =
     PP.vcat
-      ["Name map:"
+      [ "Name map:"
       , prettyMapExplicit (PP.pretty . UTF8.toString) (PP.pretty . Set.toList) (samNameMap sam)
       , "Address map:"
       , prettyMap (samAddrMap sam)
@@ -191,6 +193,15 @@ instance PP.Pretty ReoptFunType where
   pretty (ReoptNonvarargFunType a) = PP.pretty a
   pretty (ReoptPrintfFunType{}) = "<type-of-printf>"
   pretty ReoptOpenFunType = "<type-of-open>"
+
+
+-- | Returns `Just` with a positional list of which arguments are expected to be function pointers
+-- if this is a function.  Otherwise, `Nothing`.
+isFunctionWithFunctionPointerArgs :: ReoptFunType -> Maybe [Bool]
+isFunctionWithFunctionPointerArgs (ReoptNonvarargFunType ft) =
+  Just $ Vector.toList $ Vector.map (isFnPtr . funArgType) (funArgs ft)
+isFunctionWithFunctionPointerArgs _ = Nothing
+
 
 --------------------------------------------------------------------------------
 -- FunTypeMaps

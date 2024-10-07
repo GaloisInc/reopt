@@ -57,13 +57,15 @@ showArgResolverError (DebugResolveError msg) =
 showArgResolverError VarArgsUnsupported =
   "Do not support vararg functions."
 
+instance Show ArgResolverError where
+  show = showArgResolverError
+
 -- |  State monad for resolving arguments.
 data ArgResolverState = ARS
   { arsPrev :: [X86ArgInfo]
   -- ^ Arguments identified in reverse order.
   , arsNextGPP :: [F.Reg64]
-  -- ^ General purpose registers still
-  -- available for arguments.
+  -- ^ General purpose registers still available for arguments.
   , arsXMMCount :: !Word8
   -- ^ Number of xmm registers used so far.
   }
@@ -90,6 +92,8 @@ addGPReg64 nm = ArgResolver $ do
   regs <- gets arsNextGPP
   case regs of
     [] ->
+      -- NOTE: This is a known limitation of current Reopt, see:
+      -- https://github.com/GaloisInc/reopt/issues/313
       throwError $ OutOfGPRegs nm
     (r : rest) -> do
       modify $ \s ->

@@ -8,6 +8,7 @@ module Reopt.TypeInference.HeaderTypes (
   AnnFunArg (..),
   AnnType (..),
   ppAnnType,
+  isFnPtr,
 ) where
 
 import Data.ByteString.Char8 qualified as BSC
@@ -36,6 +37,10 @@ data AnnType
     TypedefAnnType !BSC.ByteString !AnnType
   | FunPtrAnnType !AnnType ![AnnType]
   deriving (Eq, Show, Read)
+
+isFnPtr :: AnnType -> Bool
+isFnPtr FunPtrAnnType{} = True
+isFnPtr _ = False
 
 -- | Pretty print the header type for the end user.
 ppAnnType :: AnnType -> String

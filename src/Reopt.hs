@@ -134,6 +134,7 @@ import Control.Monad.Trans (
   MonadIO (liftIO),
   MonadTrans (lift),
  )
+import Control.Monad.Zip (mzip)
 import Data.Bits (
   Bits (popCount, shiftR, (.&.), (.|.)),
   FiniteBits (finiteBitSize),
@@ -175,6 +176,7 @@ import Data.Macaw.CFG (
   MemWord (..),
   Memory (memAddrWidth),
   RegionIndex,
+  Value (..),
   VersionedSymbol (versymName),
   addrWidthClass,
   asSegmentOff,
@@ -224,6 +226,8 @@ import Data.Maybe (
   mapMaybe,
   maybeToList,
  )
+import Data.Either.Extra (fromRight)
+import Data.Parameterized (type (:~:)(Refl), testEquality, viewSome)
 import Data.Parameterized.Some (Some (..))
 import Data.Parameterized.TraversableF (FoldableF)
 import Data.Proxy (Proxy (Proxy))
@@ -288,6 +292,8 @@ import Reopt.CFG.Recovery (
   recoverFunction,
   x86BlockInvariants,
   x86CallRegs,
+  x86CallRegsFromName,
+  x86RegsFunName,
  )
 import Reopt.Events qualified as Events
 import Reopt.ExternalTools qualified as Ext
@@ -314,6 +320,7 @@ import Reopt.TypeInference.FunTypeMaps (
   ReoptFunType (..),
   SymAddrMap (samAddrMap, samNameMap),
   SymAddrMapLookupError (SymAddrMapAmbiguous, SymAddrMapNotFound),
+  isFunctionWithFunctionPointerArgs,
   funTypeMapsEmpty,
   getAddrSymMap,
   symAddrMapEmpty,
@@ -991,7 +998,7 @@ initDiscState ::
   ArchitectureInfo arch ->
   ReoptOptions ->
   Except String (Macaw.DiscoveryState arch)
-initDiscState mem initPoints regInfo symAddrMap explorePred ainfo reoptOpts = do
+initDiscState mem initPoints regInfo symAddrMap explorePred aInfo reoptOpts = do
   let resolveEntry qsn
         | ".cold" `BS.isSuffixOf` qsnBytes qsn = Nothing
         | otherwise = Just Macaw.MayReturnFun
@@ -1013,7 +1020,7 @@ initDiscState mem initPoints regInfo symAddrMap explorePred ainfo reoptOpts = do
       excludeAddrs <- mapM (resolveSymAddr mem regInfo symAddrMap) excludeNames
       let s = Set.fromList excludeAddrs
       let initState =
-            Macaw.emptyDiscoveryState mem (getAddrSymMap symAddrMap) ainfo
+            Macaw.emptyDiscoveryState mem (getAddrSymMap symAddrMap) aInfo
               & Macaw.trustedFunctionEntryPoints .~ entryPoints
               & Macaw.exploreFnPred .~ (\a -> Set.notMember a s && explorePred a)
               & Macaw.markAddrsAsFunction Macaw.InitAddr (Map.keys entryPoints)
@@ -1022,7 +1029,7 @@ initDiscState mem initPoints regInfo symAddrMap explorePred ainfo reoptOpts = do
       includeAddrs <- mapM (resolveSymAddr mem regInfo symAddrMap) includeNames
       let s = Set.fromList includeAddrs
       let initState =
-            Macaw.emptyDiscoveryState mem (getAddrSymMap symAddrMap) ainfo
+            Macaw.emptyDiscoveryState mem (getAddrSymMap symAddrMap) aInfo
               & Macaw.trustedFunctionEntryPoints .~ entryPoints
               -- NOTE (val) It looks a bit weird that we're not also checking
               -- `explorePred a` here.  Not sure that's intended, and it's
@@ -1185,7 +1192,7 @@ initExecDiscovery ::
   ProcessPLTEntries (Macaw.ArchAddrWidth arch) ->
   ReoptOptions ->
   InitDiscM (Either String r) (InitDiscovery arch)
-initExecDiscovery baseAddr hdrInfo ainfo pltFn reoptOpts = elfInstances hdrInfo $ do
+initExecDiscovery baseAddr hdrInfo aInfo pltFn reoptOpts = elfInstances hdrInfo $ do
   -- Create memory image for elf file.
   (mem, _secMap, warnings) <-
     case memoryForElfSegments' (addrBase baseAddr) (toInteger (addrOffset baseAddr)) hdrInfo of
@@ -1280,7 +1287,7 @@ initExecDiscovery baseAddr hdrInfo ainfo pltFn reoptOpts = elfInstances hdrInfo 
     regInfo :: RegionInfo
     regInfo = HasDefaultRegion (addrBase baseAddr)
   s <-
-    case runExcept (initDiscState mem ehFrameAddrs regInfo symAddrMap explorePred ainfo reoptOpts) of
+    case runExcept (initDiscState mem ehFrameAddrs regInfo symAddrMap explorePred aInfo reoptOpts) of
       Left e -> initError e
       Right r -> pure r
   -- Return discovery
@@ -1302,7 +1309,7 @@ doInit ::
   ProcessPLTEntries (Macaw.ArchAddrWidth arch) ->
   ReoptOptions ->
   InitDiscM (Either String r) (InitDiscovery arch)
-doInit loadOpts hdrInfo ainfo pltFn reoptOpts = elfInstances hdrInfo $ do
+doInit loadOpts hdrInfo aInfo pltFn reoptOpts = elfInstances hdrInfo $ do
   let hdr = Elf.header hdrInfo
   case Elf.headerType hdr of
     -- This is for object files.
@@ -1365,7 +1372,7 @@ doInit loadOpts hdrInfo ainfo pltFn reoptOpts = elfInstances hdrInfo $ do
         regInfo :: RegionInfo
         regInfo = HasDefaultRegion regIdx
       let explorePred = const True
-      s <- case runExcept (initDiscState mem (maybeToList entryAddr) regInfo symAddrMap explorePred ainfo reoptOpts) of
+      s <- case runExcept (initDiscState mem (maybeToList entryAddr) regInfo symAddrMap explorePred aInfo reoptOpts) of
         Left e -> initError e
         Right r -> pure r
       -- Get initial entries and predicate for exploring
@@ -1381,7 +1388,7 @@ doInit loadOpts hdrInfo ainfo pltFn reoptOpts = elfInstances hdrInfo $ do
       let
         baseAddr :: MemAddr (Macaw.ArchAddrWidth arch)
         baseAddr = MemAddr{addrBase = 0, addrOffset = fromInteger (loadRegionBaseOffset loadOpts)}
-      initExecDiscovery baseAddr hdrInfo ainfo pltFn reoptOpts
+      initExecDiscovery baseAddr hdrInfo aInfo pltFn reoptOpts
     -- Shared library or position-independent executable.
     Elf.ET_DYN -> do
       -- Get base address to use for computing section offsets.
@@ -1391,7 +1398,7 @@ doInit loadOpts hdrInfo ainfo pltFn reoptOpts = elfInstances hdrInfo $ do
           case loadOffset loadOpts of
             Just o -> MemAddr{addrBase = 0, addrOffset = fromIntegral o}
             Nothing -> MemAddr{addrBase = 1, addrOffset = 0}
-      initExecDiscovery baseAddr hdrInfo ainfo pltFn reoptOpts
+      initExecDiscovery baseAddr hdrInfo aInfo pltFn reoptOpts
     Elf.ET_CORE -> do
       initError "Core files unsupported."
     tp -> do
@@ -1437,12 +1444,13 @@ discoverFunDebugInfo ::
   MemWidth (Macaw.ArchAddrWidth arch) =>
   Elf.ElfHeaderInfo (Macaw.ArchAddrWidth arch) ->
   ArchitectureInfo arch ->
-  ReoptM
-    arch
-    r
-    (FunTypeMaps (Macaw.ArchAddrWidth arch))
-discoverFunDebugInfo hdrInfo ainfo = X86.withArchConstraints ainfo $ do
-  let resolveFn _symName _off = Nothing
+  Memory (Macaw.ArchAddrWidth arch) ->
+  MemAddr (Macaw.ArchAddrWidth arch) ->
+  ReoptM arch r (FunTypeMaps (Macaw.ArchAddrWidth arch))
+discoverFunDebugInfo hdrInfo aInfo mem baseAddr = X86.withArchConstraints aInfo $ do
+  let resolveFn _symName off =
+        let addr = incAddr (toInteger off) baseAddr
+         in asSegmentOff mem addr
   reoptIncComp $
     resolveDebugFunTypes resolveFn funTypeMapsEmpty hdrInfo
 
@@ -1529,7 +1537,7 @@ findDebugDynDep opts depName = do
           let hdr = Elf.header hdrInfo
           getElfArchInfo (Elf.headerClass hdr) (Elf.headerMachine hdr) (Elf.headerOSABI hdr) >>= \case
             Left msg -> failWithMessage ("Error reading ELF header in " ++ depLoc ++ ":") msg
-            Right (warnings, SomeArch ainfo _pltFn) -> X86.withArchConstraints ainfo $ do
+            Right (warnings, SomeArch aInfo _pltFn) -> X86.withArchConstraints aInfo $ do
               unless (null warnings) $ do
                 hPutStrLn stderr $ "Warnings reading ELF header in " ++ depLoc ++ ":"
                 mapM_ (hPutStrLn stderr) warnings
@@ -1592,12 +1600,17 @@ findDebugDynDep opts depName = do
 -- cached format or on disk for analysis).
 addDynDepDebugInfo ::
   ReoptOptions ->
+  -- | The architecture information for the binary we're analyzing, to be checked matching with the
+  -- one of the dynamic dependency.
+  ArchitectureInfo arch ->
+  Memory (Macaw.ArchAddrWidth arch) ->
+  MemAddr (Macaw.ArchAddrWidth arch) ->
   -- | Map to extend with debug info.
   Map BS.ByteString ReoptFunType ->
   -- | Dependency name as it appears in a DT_NEEDED entry in an elf file.
   BS.ByteString ->
   IO (Map BS.ByteString ReoptFunType)
-addDynDepDebugInfo rDisOpt m rawDepName = do
+addDynDepDebugInfo rDisOpt aInfoExe mem baseAddr m rawDepName = do
   let depName = BSC.unpack rawDepName
   when (roVerboseMode rDisOpt) $
     hPutStrLn stderr $
@@ -1620,7 +1633,7 @@ addDynDepDebugInfo rDisOpt m rawDepName = do
         Just (fPath, fContent) ->
           case Elf.decodeElfHeaderInfo fContent of
             Left (_, msg) -> do
-              hPutStrLn stderr $ "Error decoding elf header info in " ++ fPath ++ ":"
+              hPutStrLn stderr $ "Error decoding ELF header info in " ++ fPath ++ ":"
               hPutStrLn stderr $ "  " ++ msg
               pure m
             Right (Elf.SomeElf hdrInfo) -> do
@@ -1628,29 +1641,35 @@ addDynDepDebugInfo rDisOpt m rawDepName = do
               -- Get architecture specific information (Either String ([String], SomeArchitectureInfo w))
               getElfArchInfo (Elf.headerClass hdr) (Elf.headerMachine hdr) (Elf.headerOSABI hdr) >>= \case
                 Left errMsg -> do
-                  hPutStrLn stderr $ "Error decoding elf header info in " ++ fPath ++ ":"
+                  hPutStrLn stderr $ "Error decoding ELF header info in " ++ fPath ++ ":"
                   hPutStrLn stderr $ "  " ++ errMsg
                   pure m
-                Right (warnings, SomeArch ainfo _pltFn) -> do
-                  unless (null warnings) $ do
-                    hPutStrLn stderr $ "Warnings while computing architecture specific info for " ++ fPath ++ ":"
-                    mapM_ (hPutStrLn stderr) warnings -- IO (Either Events.ReoptFatalError r) r = mFnMap
-                  runReoptM Events.printLogEvent (discoverFunDebugInfo hdrInfo ainfo) >>= \case
-                    Left err -> do
-                      hPutStrLn stderr $ "Error decoding elf header info in " ++ fPath ++ ":"
-                      hPutStrLn stderr $ "  " ++ show err
+                Right (warnings, SomeArch aInfo _pltFn) -> do
+                  case testEquality (X86.archAddrWidth aInfoExe) (X86.archAddrWidth aInfo) of
+                    Just Refl -> do
+                      unless (null warnings) $ do
+                        hPutStrLn stderr $ "Warnings while computing architecture specific info for " ++ fPath ++ ":"
+                        mapM_ (hPutStrLn stderr) warnings -- IO (Either Events.ReoptFatalError r) r = mFnMap
+                      runReoptM Events.printLogEvent (discoverFunDebugInfo hdrInfo aInfo mem baseAddr) >>= \case
+                        Left err -> do
+                          hPutStrLn stderr $ "Error decoding elf header info in " ++ fPath ++ ":"
+                          hPutStrLn stderr $ "  " ++ show err
+                          pure m
+                        Right fnMaps -> do
+                          -- HERE is where the FunTypeMaps are computed
+                          let addrTypeMapSz = Map.size $ addrTypeMap fnMaps
+                          let noreturnMapSz = Map.size $ noreturnMap fnMaps
+                          let fnMap = nameTypeMap fnMaps
+                          unless (addrTypeMapSz == 0) $ do
+                            hPutStrLn stderr $ "WARNING: " ++ show addrTypeMapSz ++ " functions in debug info ignored (addrTypeMap) in " ++ fPath ++ "."
+                          unless (noreturnMapSz == 0) $ do
+                            hPutStrLn stderr $ "WARNING: " ++ show noreturnMapSz ++ " functions in debug info ignored (noreturnMap) in " ++ fPath ++ "."
+                          cPath <- debugInfoCacheFilePath depName
+                          writeFile cPath (show fnMap)
+                          pure $ fnMap <> m
+                    Nothing -> do
+                      hPutStrLn stderr $ fPath <> "'s architecture does not match that of the current binary, ignoring it."
                       pure m
-                    Right fnMaps -> do
-                      let addrTypeMapSz = Map.size $ addrTypeMap fnMaps
-                      let noreturnMapSz = Map.size $ noreturnMap fnMaps
-                      let fnMap = nameTypeMap fnMaps
-                      unless (addrTypeMapSz == 0) $ do
-                        hPutStrLn stderr $ "WARNING: " ++ show addrTypeMapSz ++ " functions in debug info ignored (addrTypeMap) in " ++ fPath ++ "."
-                      unless (noreturnMapSz == 0) $ do
-                        hPutStrLn stderr $ "WARNING: " ++ show noreturnMapSz ++ " functions in debug info ignored (noreturnMap) in " ++ fPath ++ "."
-                      cPath <- debugInfoCacheFilePath depName
-                      writeFile cPath (show fnMap)
-                      pure $ fnMap <> m
 
 -- | Get values of DT_NEEDED entries in an ELF file.
 parseDynamicNeeded ::
@@ -1680,10 +1699,13 @@ parseDynamicNeeded elf = elfInstances elf $
 -- | Identifies the ELF file's dynamic dependencies and searches
 -- for their debug versions to glean function type annotations.
 findDynamicDependencyDebugInfo ::
-  Elf.ElfHeaderInfo w ->
   ReoptOptions ->
+  Elf.ElfHeaderInfo (Macaw.ArchAddrWidth arch) ->
+  ArchitectureInfo arch ->
+  Memory (Macaw.ArchAddrWidth arch) ->
+  MemAddr (Macaw.ArchAddrWidth arch) ->
   IO (Map BS.ByteString ReoptFunType)
-findDynamicDependencyDebugInfo hdrInfo rDisOpt = do
+findDynamicDependencyDebugInfo rDisOpt hdrInfo aInfo mem baseAddr = do
   infoDir <- reoptHomeDir
   createDirectoryIfMissing True infoDir
   case parseDynamicNeeded hdrInfo of
@@ -1691,7 +1713,7 @@ findDynamicDependencyDebugInfo hdrInfo rDisOpt = do
       hPutStrLn stderr $ "Error retrieving dynamic dependencies: " ++ errMsg
       pure Map.empty
     Right dynDeps ->
-      foldlM (addDynDepDebugInfo rDisOpt) Map.empty dynDeps
+      foldlM (addDynDepDebugInfo rDisOpt aInfo mem baseAddr) Map.empty dynDeps
 
 ---------------------------------------------------------------------------------
 -- Logging
@@ -1822,7 +1844,7 @@ doDiscovery ::
     ( FunTypeMaps (Macaw.ArchAddrWidth arch)
     , Macaw.DiscoveryState arch
     )
-doDiscovery hdrAnn hdrInfo ainfo initState rDisOpt = X86.withArchConstraints ainfo $ do
+doDiscovery hdrAnn hdrInfo aInfo initState rDisOpt = X86.withArchConstraints aInfo $ do
   let s = initDiscoveryState initState
   let mem = Macaw.memory s
   let symAddrMap = initDiscSymAddrMap initState
@@ -1830,11 +1852,11 @@ doDiscovery hdrAnn hdrInfo ainfo initState rDisOpt = X86.withArchConstraints ain
   -- Mark initialization as finished.
   globalStepFinished Events.DiscoveryInitialization s
 
+  let baseAddr = initDiscBaseCodeAddr initState
   dynDepsMap <-
     reoptIO $
-      findDynamicDependencyDebugInfo hdrInfo rDisOpt
+      findDynamicDependencyDebugInfo rDisOpt hdrInfo aInfo mem baseAddr
 
-  let baseAddr = initDiscBaseCodeAddr initState
   annTypeMap <- headerTypeMap hdrAnn dynDepsMap symAddrMap (s ^. Macaw.trustedFunctionEntryPoints)
 
   -- Resolve debug information.
@@ -2283,7 +2305,7 @@ x86ArgumentAnalysis ::
   -- | Map from addresses to function name.
   (MemSegmentOff 64 -> Maybe BSC.ByteString) ->
   -- | Map from address to the name at that address along with type
-  Map BSC.ByteString (MemSegmentOff 64, X86FunTypeInfo) ->
+  Map BSC.ByteString X86FunTypeInfo ->
   Macaw.DiscoveryState X86_64 ->
   ReoptM
     X86_64
@@ -2292,7 +2314,8 @@ x86ArgumentAnalysis ::
     , Map (MemSegmentOff 64) (FunctionArgAnalysisFailure 64)
     )
 x86ArgumentAnalysis sysp resolveFunName funTypeMap discState = do
-  let resolveFunType fnm = snd <$> Map.lookup fnm funTypeMap
+  let resolveFunType fnm = Map.lookup fnm funTypeMap
+
   -- Generate map from symbol names to known type.
   let mem = Macaw.memory discState
   -- Compute only those functions whose types are not known.
@@ -2333,6 +2356,7 @@ data RecoverX86Output = RecoverX86Output
   , mergeRelations :: MergeRelations
   , logEvents :: [LLVMLogEvent]
   , summaryFailures :: Map (MemSegmentOff 64) (FunctionArgAnalysisFailure 64)
+  , updatedDiscoveryState :: Macaw.DiscoveryState X86_64
   }
 
 -- | Analyze an ELF binary to extract information.
@@ -2346,16 +2370,37 @@ doRecoverX86 ::
   FunctionPointerTypes X86_64 ->
   ReoptM X86_64 r RecoverX86Output
 doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys = do
+
+  let resolveX86Type :: ReoptFunType -> Maybe X86FunTypeInfo
+      resolveX86Type rtp = do
+        case runExcept (resolveReoptFunType rtp) of
+          Right r -> Just r
+          Left _l ->  Nothing
+
+  let resolveX86Addr :: BS.ByteString -> Maybe (MemSegmentOff 64)
+      resolveX86Addr nm = do
+        case Set.toList (Map.findWithDefault Set.empty nm (samNameMap symAddrMap)) of
+          [addr] -> Just addr
+          _ -> Nothing
+
+  let
+    knownNamesToType :: Map BS.ByteString ReoptFunType
+    knownNamesToType =
+        nameTypeMap debugTypeMap
+        <> Map.fromList
+          [ (recoveredFunctionName symAddrMap unnamedFunPrefix addr, rtp)
+          | (addr, rtp) <- Map.toList (addrTypeMap debugTypeMap)
+          ]
+
+  -- Map BS.ByteString ReoptFunType -> Map BS.ByteString X86FunTypeInfo
   -- Map names to known function types when we have explicit information.
   let
-    knownFunTypeMap :: Map BS.ByteString (MemSegmentOff 64, X86FunTypeInfo)
-    knownFunTypeMap =
-      Map.fromList
-        [ (recoveredFunctionName symAddrMap unnamedFunPrefix addr, (addr, xtp))
-        | (addr, rtp) <- Map.toList (addrTypeMap debugTypeMap)
-        , Right xtp <- [runExcept (resolveReoptFunType rtp)]
-        ]
-        <> Map.mapMaybeWithKey (resolveX86Type symAddrMap) (nameTypeMap debugTypeMap)
+    knownFunTypeMap :: Map BS.ByteString X86FunTypeInfo
+    knownFunTypeMap = Map.mapMaybe resolveX86Type knownNamesToType
+
+  let
+    knownFunAddrMap :: Map BS.ByteString (MemSegmentOff 64)
+    knownFunAddrMap = Map.mapMaybeWithKey (\k _ -> resolveX86Addr k) knownNamesToType
 
   -- Used to compute sizes of functions for overwriting purposes.
   let addrUseMap = mkFunUseMap discState
@@ -2389,17 +2434,22 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys =
     x86ArgumentAnalysis sysp resolveFunName knownFunTypeMap discState
 
   let
-    funTypeMap :: Map BS.ByteString (MemSegmentOff 64, X86FunTypeInfo)
-    funTypeMap =
-      knownFunTypeMap
-        <> Map.fromList
-          [ (nm, (faddr, tp))
-          | Some finfo <- Macaw.exploredFunctions discState
-          , let faddr = Macaw.discoveredFunAddr finfo
-          , let nm = Map.findWithDefault (error "Address undefined in funNameMap") faddr funNameMap
-          , tp <- maybeToList $ Map.lookup faddr fDems
-          ]
+    newTypeMaps :: (Map BS.ByteString X86FunTypeInfo, Map BS.ByteString (MemSegmentOff 64))
+    newTypeMaps = case unzip [ ((nm, tp), (nm, faddr))
+                    | Some finfo <- Macaw.exploredFunctions discState
+                    , let faddr = Macaw.discoveredFunAddr finfo
+                    , let nm = Map.findWithDefault (error "Address undefined in funNameMap") faddr funNameMap
+                    , tp <- maybeToList $ Map.lookup faddr fDems
+                    ]
+                  of
+                    (fType, fAddr) -> (Map.fromList fType, Map.fromList fAddr)
 
+
+  let funTypeMap = fst newTypeMaps <> knownFunTypeMap
+  let funAddrMap = snd newTypeMaps <> knownFunAddrMap
+
+  let resolveFunName a = Map.lookup a funNameMap
+  let resolveFunType fnm = Map.lookup fnm funTypeMap
   fnDefsAndLogEvents <- fmap catMaybes $
     forM (Macaw.exploredFunctions discState) $ \(Some finfo) -> do
       let faddr = Macaw.discoveredFunAddr finfo
@@ -2409,7 +2459,7 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys =
       let abandonBecause reason = do
             funStepInfo Events.Discovery ("Abandoning " <> BSC.unpack nm <> " because " <> reason)
             return Nothing
-      case snd <$> Map.lookup nm funTypeMap of
+      case Map.lookup nm funTypeMap of
         Nothing -> do
           -- TODO: Check an error has already been reported on this.
           abandonBecause "we don't know its type"
@@ -2427,8 +2477,6 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys =
               abandonBecause "the function has a PLT"
             FunctionOK -> do
               funStepStarted Events.InvariantInference fnId
-              let resolveFunName a = Map.lookup a funNameMap
-              let resolveFunType fnm = snd <$> Map.lookup fnm funTypeMap
               case x86BlockInvariants sysp mem resolveFunName resolveFunType finfo retRegs of
                 Left e -> do
                   funStepFailed Events.InvariantInference fnId e
@@ -2444,6 +2492,35 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys =
                     Right fn -> do
                       funStepFinished Events.Recovery fnId ()
                       pure (Just fn)
+
+  let foldFromOn base list op = foldr op base list
+  let updatedDiscoveryState =
+        foldFromOn discState (Map.assocs (discState ^. Macaw.funInfo)) $ \ (_off, Some funInfo) ds ->
+          foldFromOn ds (Map.assocs (funInfo ^. Macaw.parsedBlocks)) $ \ (_off, pb) discState'  ->
+              -- If IP comes from a read of a relocatable value:
+              fromRight discState' $ case Macaw.pblockTermStmt pb of
+                Macaw.ParsedCall callRegs _mRetAddr -> do
+                    nm <- x86RegsFunName mem resolveFunName callRegs
+                    rr <- x86CallRegsFromName mem nm resolveFunType callRegs
+
+                    -- Figure out which arguments we expect to be function pointers
+                    let expectedFnPtrsByPosition =
+                          fromMaybe
+                            (repeat False)
+                            (isFunctionWithFunctionPointerArgs =<< Map.lookup nm (nameTypeMap debugTypeMap))
+
+                    let extractAddressFromValue :: forall ids tp. Value X86_64 ids tp -> Maybe (Macaw.MemSegmentOff 64)
+                        extractAddressFromValue = \case
+                          Macaw.RelocatableValue _ addr' -> asSegmentOff mem addr'
+                          Macaw.BVValue _ addr' -> let addrWord = Macaw.memWord (fromInteger addr')
+                                                   in resolveAbsoluteAddr mem addrWord
+                          _ -> Nothing
+
+                    let eligible = map fst . filter snd $ zip (callArgValues rr) expectedFnPtrsByPosition
+                    let addrs = mapMaybe (viewSome extractAddressFromValue) eligible
+                    return $ Macaw.markAddrsAsFunction Macaw.UserRequest addrs discState'
+
+                _ -> return discState'
   let
     fnDefs = map recoveredFunction fnDefsAndLogEvents
     logEvents = concatMap llvmLogEvents fnDefsAndLogEvents
@@ -2470,7 +2547,7 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys =
                 Macaw.NoReturnFun -> True
           }
         | (nm, _) <- Map.toList declFunTypeMap
-        , (addr, tp) <- maybeToList $ Map.lookup nm funTypeMap
+        , (addr, tp) <- maybeToList $ mzip (Map.lookup nm funAddrMap) (Map.lookup nm funTypeMap)
         , let noRet = Map.findWithDefault Macaw.MayReturnFun addr (discState ^. Macaw.trustedFunctionEntryPoints)
         ]
 
@@ -2513,19 +2590,8 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState funPtrTys =
         , mergeRelations
         , logEvents
         , summaryFailures
+        , updatedDiscoveryState
         }
-
-resolveX86Type ::
-  SymAddrMap 64 ->
-  BS.ByteString ->
-  ReoptFunType ->
-  Maybe (MemSegmentOff 64, X86FunTypeInfo)
-resolveX86Type m nm rtp
-  | Right r <- runExcept (resolveReoptFunType rtp)
-  , [addr] <- Set.toList (Map.findWithDefault Set.empty nm (samNameMap m)) =
-      Just (addr, r)
-  | otherwise =
-      Nothing
 
 {-
 -- | Initialization checks needed if running function recovery.
@@ -2574,9 +2640,9 @@ reoptX86Init loadOpts reoptOpts hdrInfo = do
         pure Linux
   initState <-
     reoptRunInit $ do
-      let ainfo = osArchitectureInfo os
+      let aInfo = osArchitectureInfo os
       let pltFn = processX86PLTEntries
-      doInit loadOpts hdrInfo ainfo pltFn reoptOpts
+      doInit loadOpts hdrInfo aInfo pltFn reoptOpts
   pure (os, initState)
 
 -- | Checks that the prefix we intend to use for unnamed functions is not used
@@ -2673,11 +2739,12 @@ reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap firstDiscState = 
     recoverX86Output <- doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState funPtrTys
 
     let recMod = recoveredModule recoverX86Output
+    let discState' = updatedDiscoveryState recoverX86Output
 
     let moduleConstraints =
           genModuleConstraints
             recMod
-            (Macaw.memory discState)
+            (Macaw.memory discState')
             (roTraceUnification rOpts)
             (roTraceConstraintOrigins rOpts)
 
@@ -2690,7 +2757,7 @@ reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap firstDiscState = 
     -- NOTE: if we mark addresses that have already been tried (even if they
     -- have failed), Macaw will not add them to the unexplored frontier, so
     -- there is no risk here.
-    let markedDiscState = Macaw.markAddrsAsFunction Macaw.UserRequest candidateAddresses discState
+    let markedDiscState = Macaw.markAddrsAsFunction Macaw.UserRequest candidateAddresses discState'
     let unexplored = markedDiscState ^. Macaw.unexploredFunctions
 
     if null unexplored
@@ -2713,11 +2780,8 @@ reoptInitialDiscovery ::
 reoptInitialDiscovery loadOpts reoptOpts hdrAnn hdrInfo = do
   (os, initState) <- reoptX86Init loadOpts reoptOpts hdrInfo
   let symAddrMap = initDiscSymAddrMap initState
-  -- traceM "SymAddrMap is:"
-  let ainfo = osArchitectureInfo os
-  -- traceM $ show $ samAddrMap symAddrMap
-  -- traceM $ show $ samNameMap symAddrMap
-  (debugTypeMap, discState) <- doDiscovery hdrAnn hdrInfo ainfo initState reoptOpts
+  let aInfo = osArchitectureInfo os
+  (debugTypeMap, discState) <- doDiscovery hdrAnn hdrInfo aInfo initState reoptOpts
   return (os, symAddrMap, debugTypeMap, discState)
 
 -- | Analyze an ELF binary to extract information.

@@ -34,6 +34,7 @@ import Data.Macaw.CFG (
   ArchAddrWidth,
   ArchSegmentOff,
   MemSegmentOff,
+  MemWidth,
  )
 import Data.Macaw.Discovery (
   NoReturnFunStatus (MayReturnFun, NoReturnFun),
@@ -291,6 +292,7 @@ resolveDwarfSubprogramDebugName sub moff
 
 -- | Resolve type information from subroutine.
 resolveSubprogramType ::
+  MemWidth (ArchAddrWidth arch) =>
   -- | Compile unit for this sub program
   Dwarf.CompileUnit ->
   -- | Annotations from source file
@@ -359,6 +361,7 @@ type ResolveAddrFn w = BSC.ByteString -> Word64 -> Maybe (MemSegmentOff w)
 
 -- | Resolve type information from subroutine.
 resolveSubprogram ::
+  MemWidth (ArchAddrWidth arch) =>
   ResolveAddrFn (ArchAddrWidth arch) ->
   -- | Compile unit for this sub program
   Dwarf.CompileUnit ->
@@ -395,6 +398,7 @@ resolveSubprogram resolveFn cu annMap sub = do
 
 -- | Add all compile units in plugin
 resolveCompileUnits ::
+  MemWidth (ArchAddrWidth arch) =>
   ResolveAddrFn (ArchAddrWidth arch) ->
   -- | Map from function names to type info.
   FunTypeMaps (ArchAddrWidth arch) ->
@@ -420,6 +424,7 @@ resolveCompileUnits resolveFn annMap (Just (Right ctx)) = do
 -- | Populate function type information using debug information.
 resolveDebugFunTypes ::
   forall arch r.
+  MemWidth (ArchAddrWidth arch) =>
   ResolveAddrFn (ArchAddrWidth arch) ->
   FunTypeMaps (ArchAddrWidth arch) ->
   -- | Elf file for header information
