@@ -1,12 +1,12 @@
-FROM centos:7
+FROM ubuntu:20.04
 
 # Install system libraries
-RUN yum install -y centos-release-scl \
- && yum install -y http://opensource.wandisco.com/centos/7/git/x86_64/wandisco-git-release-7-2.noarch.rpm \
- && yum install -y devtoolset-8-gcc devtoolset-8-make gmp-devel zlib-devel git lzma which \
- && yum clean all \
- && rm -rf /var/cache/yum
-ENV PATH=/opt/rh/devtoolset-8/root/bin:${PATH}
+# https://www.haskell.org/ghcup/install/#version-2004-2010
+RUN apt update -y \
+ && apt install -y build-essential curl libffi-dev \
+ && apt install -y libffi7 libgmp-dev libgmp10 libncurses-dev \
+ && apt install -y libncurses5 libtinfo5 \
+ && apt install -y git lzma zlib1g-dev libghc-zlib-dev
 
 # Install GHCUP
 ENV PATH=/root/.ghcup/bin:${PATH}

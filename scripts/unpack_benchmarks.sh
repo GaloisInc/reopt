@@ -12,7 +12,7 @@ unlzma_mv_untar () {
   pushd $DIR
   echo -n "Unpacking and extracting contents of $TAR_FILE.lzma in $DIR..."
   if [[ "$TAR_FILE.lzma" -nt "$TAR_FILE"  ]] ; then
-    unlzma -k "$TAR_FILE.lzma"
+    unlzma -fk "$TAR_FILE.lzma"
   fi
   TARVER=`tar --version | head -n 1`
   if [[ "$TARVER" =~ "tar (GNU tar)" ]]; then
