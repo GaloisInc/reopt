@@ -84,7 +84,7 @@ jobs:
     #- name: CentOS7 reopt-explore executable tests (long)
     #  run: ./scripts/test_reopt_explore.sh all
     - name: reopt-explore CentOS7 Summary Artifact
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: centos7-bin-summary.txt
         path: deps/reopt-benchmark-binaries/centos7-dev/centos7-bin-summary.txt
@@ -97,7 +97,7 @@ jobs:
         cd dist
         tar cvfz reopt.tgz reopt
     - name: Make reopt
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: reopt
         path: dist/reopt.tgz
@@ -131,7 +131,7 @@ jobs:
   #       vsce package
   #       mv reopt-0.0.1.vsix reopt.vsix
   #   - name: Upload extension artifact
-  #     uses: actions/upload-artifact@v2
+  #     uses: actions/upload-artifact@v4
   #     with:
   #       name: vscode-extension
   #       path: vscode-plugin/reopt.vsix
@@ -164,7 +164,7 @@ jobs:
   #       cd dist
   #       tar cvfz reopt-vcg.tgz reopt-vcg
   #   - name: Make reopt-vcg
-  #     uses: actions/upload-artifact@v2
+  #     uses: actions/upload-artifact@v4
   #     with:
   #       name: reopt-vcg
   #       path: dist/reopt-vcg.tgz
