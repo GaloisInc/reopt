@@ -2713,7 +2713,10 @@ reoptInitialDiscovery ::
 reoptInitialDiscovery loadOpts reoptOpts hdrAnn hdrInfo = do
   (os, initState) <- reoptX86Init loadOpts reoptOpts hdrInfo
   let symAddrMap = initDiscSymAddrMap initState
+  -- traceM "SymAddrMap is:"
   let ainfo = osArchitectureInfo os
+  -- traceM $ show $ samAddrMap symAddrMap
+  -- traceM $ show $ samNameMap symAddrMap
   (debugTypeMap, discState) <- doDiscovery hdrAnn hdrInfo ainfo initState reoptOpts
   return (os, symAddrMap, debugTypeMap, discState)
 
