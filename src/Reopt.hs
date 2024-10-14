@@ -481,6 +481,7 @@ data ReoptOptions = ReoptOptions
   , roDynDepPaths :: ![FilePath]
   -- ^ Additional paths to search for dynamic dependencies.
   , roDynDepDebugPaths :: ![FilePath]
+  , roMaxRestarts :: Maybe Int
   -- ^ Additional paths to search for debug versions of dynamic dependencies.
   , roTraceUnification :: !Bool
   -- ^ Trace unification in the solver
@@ -499,6 +500,7 @@ defaultReoptOptions =
     , roDiscoveryOptions = reoptDefaultDiscoveryOptions
     , roDynDepPaths = []
     , roDynDepDebugPaths = []
+    , roMaxRestarts = Nothing
     , roTraceUnification = False
     , roTraceConstraintOrigins = False
     }
@@ -2745,6 +2747,7 @@ reoptRecoveryLoop symAddrMap rOpts funPrefix sysp debugTypeMap firstDiscState = 
           genModuleConstraints
             recMod
             (Macaw.memory discState')
+            (roMaxRestarts rOpts)
             (roTraceUnification rOpts)
             (roTraceConstraintOrigins rOpts)
 

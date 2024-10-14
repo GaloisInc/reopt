@@ -14,6 +14,7 @@ module Reopt.TypeInference.Solver.Monad (
   Conditional (..),
   Conditional',
   Conjunction (..),
+  ConstraintSolvingReader (..),
   ConstraintSolvingState (..),
   defineRowVar,
   defineTyVar,
@@ -43,15 +44,16 @@ module Reopt.TypeInference.Solver.Monad (
   withFresh,
 ) where
 
-import Control.Lens (Lens', use, (%%=), (%=), (<<+=))
-import Control.Monad.State (MonadState, State, evalState)
+import Control.Lens (Lens', view, (%%=), (%=), (<<+=))
 import Data.Foldable (asum)
+import Data.Function.Slip (slipr)
 import Data.Generics.Labels ()
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import GHC.Generics (Generic)
 import Prettyprinter qualified as PP
 
+import Control.Monad.RWS.Strict
 import Reopt.TypeInference.Solver.Constraints (
   ConstraintProvenance,
   EqC (EqC),
@@ -81,6 +83,16 @@ import Reopt.TypeInference.Solver.UnionFindMap qualified as UM
 
 type Conditional' = Conditional ([EqC], [EqRowC])
 
+data ConstraintSolvingReader = ConstraintSolvingReader
+  { rMaxNumberOfRestarts :: Maybe Int
+  , rPtrWidth :: Int
+  -- ^ The width of a pointer, in bits.  This can go away when tyvars have an associated size, it is
+  -- only used for PtrAddC solving.
+  , rTraceUnification :: Bool
+  , rTraceConstraintOrigins :: Bool
+  }
+  deriving (Generic)
+
 data ConstraintSolvingState = ConstraintSolvingState
   { ctxEqCs :: [EqC]
   , ctxEqRowCs :: [EqRowC]
@@ -90,22 +102,16 @@ data ConstraintSolvingState = ConstraintSolvingState
   , nextTraceId :: Int
   , nextRowVar :: Int
   , nextTyVar :: Int
-  , ptrWidth :: Int
-  -- ^ The width of a pointer, in bits.  This can go away when
-  -- tyvars have an associated size, it is only used for PtrAddC
-  -- solving.
   , ctxTyVars :: UnionFindMap TyVar TyVar ITy'
   -- ^ The union-find data-structure mapping each tyvar onto its
   -- representative tv.  If no mapping exists, it is a self-mapping.
   , ctxRowVars :: UnionFindMap RowVar RowInfo (FieldMap TyVar)
-  , -- Debugging
-    ctxTraceUnification :: Bool
-  , ctxTraceConstraintOrigins :: Bool
+  , ctxNumberOfRestarts :: Int
   }
   deriving (Generic)
 
-emptyContext :: Int -> Bool -> Bool -> ConstraintSolvingState
-emptyContext w trace orig =
+emptyConstraintSolvingState :: ConstraintSolvingState
+emptyConstraintSolvingState =
   ConstraintSolvingState
     { ctxEqCs = []
     , ctxEqRowCs = []
@@ -115,20 +121,29 @@ emptyContext w trace orig =
     , nextTraceId = 0
     , nextRowVar = 0
     , nextTyVar = 0
-    , ptrWidth = w
     , ctxTyVars = UM.empty
     , ctxRowVars = UM.empty
-    , ctxTraceUnification = trace
-    , ctxTraceConstraintOrigins = orig
+    , ctxNumberOfRestarts = 0
     }
 
 newtype SolverM a = SolverM
-  { getSolverM :: State ConstraintSolvingState a
+  { getSolverM :: RWS ConstraintSolvingReader () ConstraintSolvingState a
   }
-  deriving (Applicative, Functor, Monad, MonadState ConstraintSolvingState)
+  deriving
+    ( Applicative
+    , Functor
+    , Monad
+    , MonadState ConstraintSolvingState
+    , MonadReader ConstraintSolvingReader
+    )
 
-runSolverM :: Bool -> Bool -> Int -> SolverM a -> a
-runSolverM b o w = flip evalState (emptyContext w b o) . getSolverM
+runSolverM ::
+  ConstraintSolvingReader ->
+  SolverM a ->
+  a
+runSolverM initReader = fst . slipr evalRWS initReader initState . getSolverM
+ where
+  initState = emptyConstraintSolvingState
 
 --------------------------------------------------------------------------------
 -- Adding constraints
@@ -272,13 +287,13 @@ unsafeUnifyTyVars root leaf = #ctxTyVars %= UM.unify root leaf
 -- Other stuff
 
 ptrWidthNumTy :: SolverM ITy'
-ptrWidthNumTy = NumTy <$> use #ptrWidth
+ptrWidthNumTy = NumTy <$> view #rPtrWidth
 
 traceUnification :: SolverM Bool
-traceUnification = use #ctxTraceUnification
+traceUnification = view #rTraceUnification
 
 traceConstraintOrigins :: SolverM Bool
-traceConstraintOrigins = use #ctxTraceConstraintOrigins
+traceConstraintOrigins = view #rTraceConstraintOrigins
 
 --------------------------------------------------------------------------------
 -- Conditional constraints
