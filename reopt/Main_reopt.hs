@@ -207,6 +207,9 @@ data Args = Args
   -- ^ Trace unification of the type inference solver
   , traceConstraintOrigins :: Bool
   -- ^ Trace the origin of constraints in the type inference solver
+  , maxRestarts :: Maybe Int
+  -- ^ How many time the type constraint solver should restart before giving up.  `Nothing` means
+  -- infinite restarts.
   }
   deriving (Generic)
 
@@ -247,6 +250,7 @@ defaultArgs =
     , performRecovery = False
     , traceTypeUnification = False
     , traceConstraintOrigins = False
+    , maxRestarts = Nothing
     }
 
 ------------------------------------------------------------------------
@@ -298,6 +302,13 @@ traceConstraintOriginsP =
   switch $
     long "trace-constraint-origins"
       <> help "Trace the origins of constraints in the type inference engine"
+
+maxRestartsP :: Parser (Maybe Int)
+maxRestartsP =
+  optional $ option auto $
+    long "max-restarts"
+      <> metavar "NUMBER"
+      <> help "Number of times the type constraint solver should restart before giving up"
 
 outputPathP :: Parser String
 outputPathP =
@@ -623,6 +634,7 @@ arguments =
     <*> performRecoveryP
     <*> traceTypeUnificationP
     <*> traceConstraintOriginsP
+    <*> maxRestartsP
 
 -- | Parser to set the path to the binary to analyze.
 programPathP :: Parser String
@@ -668,6 +680,7 @@ argsReoptOptions args = do
       , roDiscoveryOptions = args ^. #discOpts
       , roDynDepPaths = dynDepPath args
       , roDynDepDebugPaths = dynDepDebugPath args ++ gdbDebugDirs
+      , roMaxRestarts = maxRestarts args
       , roTraceUnification = traceTypeUnification args
       , roTraceConstraintOrigins = traceConstraintOrigins args
       }
@@ -722,7 +735,8 @@ showConstraints args elfPath = do
       doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState Map.empty
 
     let recMod = recoveredModule recoverX86Output
-    pure $ genModuleConstraints recMod (Macaw.memory discState) (traceTypeUnification args) (traceConstraintOrigins args)
+    pure $ genModuleConstraints recMod (Macaw.memory discState)
+      (maxRestarts args) (traceTypeUnification args) (traceConstraintOrigins args)
 
   mc <- handleEitherWithExit mr
 

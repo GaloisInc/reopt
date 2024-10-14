@@ -114,6 +114,7 @@ import Reopt.TypeInference.Solver.Constraints (
   ConstraintProvenance (..),
   FnRepProvenance (..),
  )
+import Reopt.TypeInference.Solver.Monad (ConstraintSolvingReader (..))
 import Reopt.TypeInference.Solver.Types (TyF (..))
 
 -- This algorithm proceeds in stages:
@@ -241,20 +242,29 @@ inSolverM = CGenM . lift . lift
 
 runCGenM ::
   Memory (ArchAddrWidth arch) ->
+  Maybe Int ->
   Bool ->
   Bool ->
   CGenM CGenGlobalContext arch a ->
   a
-runCGenM mem traceWanted orig (CGenM m) = runSolverM traceWanted orig ptrWidth $ do
-  let segs = memSegments mem
-  -- Allocate a row variable for each memory segment
-  memRows <- Map.fromList <$> mapM (\seg -> (,) seg <$> S.freshRowVar) segs
-  let ctxt0 =
-        CGenGlobalContext
-          { _cgenMemory = mem
-          , _cgenMemoryRegions = memRows
+runCGenM mem maxRestarts traceWanted orig (CGenM m) = do
+  let initReader =
+        ConstraintSolvingReader
+          { rMaxNumberOfRestarts = maxRestarts
+          , rPtrWidth = ptrWidth
+          , rTraceConstraintOrigins = orig
+          , rTraceUnification = traceWanted
           }
-  evalStateT (Reader.runReaderT m ctxt0) st0
+  runSolverM initReader $ do
+    let segs = memSegments mem
+    -- Allocate a row variable for each memory segment
+    memRows <- Map.fromList <$> mapM (\seg -> (,) seg <$> S.freshRowVar) segs
+    let ctxt0 =
+          CGenGlobalContext
+            { _cgenMemory = mem
+            , _cgenMemoryRegions = memRows
+            }
+    evalStateT (Reader.runReaderT m ctxt0) st0
  where
   ptrWidth = widthVal (memWidth mem)
 
@@ -981,10 +991,11 @@ genModuleConstraints ::
   FoldableFC (ArchFn arch) =>
   RecoveredModule arch ->
   Memory (ArchAddrWidth arch) ->
+  Maybe Int ->
   Bool ->
   Bool ->
   ModuleConstraints arch
-genModuleConstraints m mem traceWanted orig = runCGenM mem traceWanted orig $ do
+genModuleConstraints m mem maxRestarts traceWanted orig = runCGenM mem maxRestarts traceWanted orig $ do
   -- allocate type variables for functions without types
   -- FIXME: we currently ignore hints
 

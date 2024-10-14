@@ -54,6 +54,7 @@ library
     attoparsec-aeson,
     base64,
     bytestring,
+    composition-extra,
     containers,
     directory,
     elf-edit >= 0.40,

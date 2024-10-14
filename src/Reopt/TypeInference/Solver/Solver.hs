@@ -27,6 +27,7 @@ import Data.Set qualified as Set
 import Debug.Trace (trace)
 import Prettyprinter qualified as PP
 
+import Control.Monad.RWS (asks)
 import Control.Monad.Trans (lift)
 import Reopt.TypeInference.Solver.Constraints (
   ConstraintProvenance (..),
@@ -43,6 +44,7 @@ import Reopt.TypeInference.Solver.Finalize (
 import Reopt.TypeInference.Solver.Monad (
   Conditional (..),
   Conditional',
+  ConstraintSolvingReader (rMaxNumberOfRestarts, rPtrWidth),
   ConstraintSolvingState (..),
   SolverM,
   addEqC,
@@ -180,17 +182,19 @@ solveHeadReset fld doit = do
       put resetSt
 
       -- Forget everything we know in resetSt about the eqvs for tv
-      let eqs = eqvClasses (ctxTyVars oldSt)
-          eqsTv = Map.findWithDefault [] tv eqs
+      let
+        eqs = eqvClasses (ctxTyVars oldSt)
+        eqsTv = Map.findWithDefault [] tv eqs
       traverse_ undefineTyVar eqsTv
 
       -- FIXME: gross
-      defineTyVar tv (ConflictTy (ptrWidth resetSt))
+      ptrWidth <- asks rPtrWidth
+      defineTyVar tv (ConflictTy ptrWidth)
       -- FIXME: this could cause problems if we allocate tyvars after
       -- we start solving.  Because we don't, this should work.
       mapM_ (addTyVarEq' ConflictProv tv) eqsTv -- retain eqv class for conflict var.
       get
-    put resetSt'
+    put $ resetSt'{ctxNumberOfRestarts = ctxNumberOfRestarts resetSt + 1}
 
 solveFirst ::
   Lens' ConstraintSolvingState [a] ->
@@ -227,8 +231,9 @@ _solveAll fld solve = do
   go acc progd [] = restore acc $> progd -- finished here, we didn't so anything.
   go acc progd (c : cs) = do
     (retain, progress) <- solve c
-    let acc' = if retain == Retain then c : acc else acc
-        progd' = progd || madeProgress progress
+    let
+      acc' = if retain == Retain then c : acc else acc
+      progd' = progd || madeProgress progress
     go acc' progd' cs
 
 -- | @preprocess l f# just pre-processes the element at @l@, and so
@@ -246,11 +251,17 @@ preprocess fld f =
       fld %= (<> r)
 
 solverLoop :: SolverM ()
-solverLoop = evalStateT go =<< get
+solverLoop = do
+  maxRestarts <- asks rMaxNumberOfRestarts
+  evalStateT (go (exceeds maxRestarts)) =<< get
  where
-  go = do
+  exceeds (Just maxRestarts) r = r > maxRestarts
+  exceeds Nothing _ = False
+
+  go isTooMany = do
+    tooManyRestarts <- gets $ isTooMany . ctxNumberOfRestarts
     keepGoing <- orM solvers
-    when keepGoing go
+    when (keepGoing && not tooManyRestarts) (go isTooMany)
 
   solvers =
     [ solveHeadReset #ctxEqCs solveEqC
@@ -371,14 +382,16 @@ solveConditional c = traceContext' "solveConditional" c $ do
 solveEqRowC :: EqRowC -> SolverM ()
 solveEqRowC eqc = traceContext' "solveEqRowC" eqc $ do
   (le, m_lfm) <- lookupRowExpr (eqRowLHS eqc)
-  let lo = rowExprShift le
-      lv = rowExprVar le
-      lfm = fromMaybe emptyFieldMap m_lfm
+  let
+    lo = rowExprShift le
+    lv = rowExprVar le
+    lfm = fromMaybe emptyFieldMap m_lfm
 
   (re, m_rfm) <- lookupRowExpr (eqRowRHS eqc)
-  let ro = rowExprShift re
-      rv = rowExprVar re
-      rfm = fromMaybe emptyFieldMap m_rfm
+  let
+    ro = rowExprShift re
+    rv = rowExprVar re
+    rfm = fromMaybe emptyFieldMap m_rfm
 
   case () of
     _
@@ -390,8 +403,9 @@ solveEqRowC eqc = traceContext' "solveEqRowC" eqc $ do
   unify delta lowv lowfm highv highfm = do
     undefineRowVar highv
     unsafeUnifyRowVars (RowExprShift delta lowv) highv
-    let highfm' = shiftFieldMap delta highfm
-        (lowfm', newEqs) = unifyFieldMaps lowfm highfm'
+    let
+      highfm' = shiftFieldMap delta highfm
+      (lowfm', newEqs) = unifyFieldMaps lowfm highfm'
     defineRowVar lowv lowfm'
     traverse_ (uncurry (addTyVarEq' FromEqRowCProv)) newEqs
 
@@ -437,7 +451,7 @@ solveEqC eqc = do
 -- when the type variable is conflicted.
 unifyTypes :: TyVar -> ITy' -> ITy' -> SolverM (Maybe TyVar)
 unifyTypes tv ty1 ty2 = do
-  pW <- gets ptrWidth
+  pW <- asks rPtrWidth
   case (ty1, ty2) of
     _ | ty1 == ty2 -> pure Nothing
     (NumTy i, NumTy i')
