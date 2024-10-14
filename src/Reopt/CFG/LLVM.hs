@@ -2263,7 +2263,7 @@ getInferredTypeForAssignId ::
   Proxy arch ->
   FnAssignId ->
   Eff es (Maybe FTy)
-getInferredTypeForAssignId _ aId = trace ("Getting inferred type for aId " <> show aId) $ do
+getInferredTypeForAssignId _ aId = do
   fn <- R.ask
   constraints <- R.ask @(ModuleConstraints arch)
   let fnTypes =
