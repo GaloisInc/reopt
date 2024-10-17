@@ -840,11 +840,11 @@ call (valueOf -> f) args =
   case L.typedType f of
     L.PtrTo (L.FunTy res _argTypes _varArgs) -> do
       case res of
-        L.PrimType L.Void -> do
-          error "Call expected to return a value, but returns void."
-        _ -> do
-          fmap (L.Typed res) $ evalInstr $ L.Call False (L.typedType f) (L.typedValue f) args
-    _ -> error $ "Call given non-function pointer argument:\n" ++ show f
+        L.PrimType L.Void ->
+          error "call: expected to return a value, but returns void."
+        _ ->
+          L.Typed res <$> evalInstr (L.Call False res (L.typedValue f) args)
+    _ -> error $ "call: given non-function pointer argument:\n" ++ show f
 
 -- | Generate a non-tail call that does not return a value
 call_ :: HasValue v => v -> [L.Typed L.Value] -> BBLLVM arch ()
@@ -852,7 +852,7 @@ call_ (valueOf -> f) args =
   case L.typedType f of
     L.PtrTo (L.FunTy (L.PrimType L.Void) _argTypes _varArgs) -> do
       effect $ L.Call False (L.typedType f) (L.typedValue f) args
-    _ -> error $ "call_ given non-function pointer argument\n" ++ show f
+    _ -> error $ "call_: given non-function pointer argument\n" ++ show f
 
 -- | Sign extend a boolean value to the given width.
 carryValue ::
