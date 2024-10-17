@@ -1252,9 +1252,8 @@ resolveLoadNameAndType memRep =
         error $ "Vector width of " ++ show n ++ " is too large."
       pure ("v" ++ show n ++ eltName, L.Vector (fromIntegral (natValue n)) eltType)
 
--- | The type inference will infer a pointer-to-struct type for the
--- pointer (or a conflict type if one is detected).  This will do a
--- GEP or cast as required.
+-- | The type inference will infer a pointer-to-struct type for the pointer (or a conflict type if
+-- one is detected).  This will do a GEP or cast as required.
 pointerForMemOp ::
   forall arch.
   FnArchConstraints arch =>

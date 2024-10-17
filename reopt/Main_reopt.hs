@@ -784,8 +784,7 @@ collectInvariants ref evt = do
     _ -> do
       pure ()
 
--- | This command is called when reopt is called with no specific
--- action.
+-- | This command is called when reopt is called with no specific action.
 performReopt :: Args -> FilePath -> IO ()
 performReopt args elfPath = do
   let somethingToDo = isJust (cfgExportPath args) || shouldRecover args
