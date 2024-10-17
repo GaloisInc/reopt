@@ -2160,8 +2160,7 @@ functionTypeToFTy fty =
     mkRet Nothing = FVoidTy
     mkRet (Just tau) = macawTypeToFTy tau
 
--- | Returns the type that was inferred for the given value via constraint
--- solving, if any.
+-- | Returns the type that was inferred for the given value via constraint solving, if any.
 getInferredType ::
   forall arch es tp.
   GetInferredTypeEffects arch es =>
@@ -2197,7 +2196,7 @@ getInferredType pxy (FnArg arg _typ) = do
 getInferredType _ (FnCodePointer fn) = do
   mc <- R.ask @(ModuleConstraints arch)
   case Map.lookup fn (mcFunTypes mc) of
-    Nothing -> error $ "getInferredType: lookup failed for " <> show (PP.pretty fn)
+    Nothing -> return Nothing
     Just fty ->
       case asFullyResolvedFunctionType mc fty of
         Just ty -> return $ Just ty
