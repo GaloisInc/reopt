@@ -985,11 +985,11 @@ appToLLVM lhs app = bbArchConstraints $ do
       case (typeOfResult, tx, ty) of
         (_, Just (FPtrTy _), Just (FPtrTy _)) ->
           error "Inferred a pointer type for both addends, this suggests a bug in the constraint generation/solving!"
-        (Just (FPtrTy lhsty), Just FPtrTy{}, Just FNumTy{})
+        (Just lhsty@(FPtrTy _), Just FPtrTy{}, Just FNumTy{})
           | FnAssignedValue FnAssignment{fnAssignRhs = FnAddrWidthConstant o} <- y ->
               bvAddPtrOffset (tyToLLVMType ptrWidth lhsty) x o
           | otherwise -> bvAddPtrSymbolic (tyToLLVMType ptrWidth lhsty) x y
-        (Just (FPtrTy lhsty), Just FNumTy{}, Just FPtrTy{})
+        (Just lhsty@(FPtrTy _), Just FNumTy{}, Just FPtrTy{})
           | FnAssignedValue FnAssignment{fnAssignRhs = FnAddrWidthConstant o} <- x ->
               bvAddPtrOffset (tyToLLVMType ptrWidth lhsty) y o
           | otherwise -> bvAddPtrSymbolic (tyToLLVMType ptrWidth lhsty) y x
