@@ -1252,9 +1252,8 @@ resolveLoadNameAndType memRep =
         error $ "Vector width of " ++ show n ++ " is too large."
       pure ("v" ++ show n ++ eltName, L.Vector (fromIntegral (natValue n)) eltType)
 
--- | The type inference will infer a pointer-to-struct type for the
--- pointer (or a conflict type if one is detected).  This will do a
--- GEP or cast as required.
+-- | The type inference will infer a pointer-to-struct type for the pointer (or a conflict type if
+-- one is detected).  This will do a GEP or cast as required.
 pointerForMemOp ::
   forall arch.
   FnArchConstraints arch =>
@@ -1270,7 +1269,9 @@ pointerForMemOp ctx ptr pointeeType = do
   getInferredTypeBBLLVM ptr >>= \case
     Just FPtrTy{} -> llvmGEPFromPtr pointeeType 0 ptrV
     Just FConflictTy{} -> llvmAsPtr ctx pointeeType ptrV
-    t -> error $ "Unexpected type at pointerForMemOp " ++ show (PP.pretty t)
+    Just t -> error $ "Unexpected type at pointerForMemOp: " ++ show (PP.pretty t)
+    Nothing -> return ptrV
+      -- error $ "No inferred type for " ++ show (PP.pretty ptr)
 
 -- | Convert an assignment to a llvm expression
 rhsToLLVM ::
