@@ -1167,17 +1167,21 @@ bvSubPtrPtr x y = do
 
 -- | This emits a getElementPointer in the special case where the value argument is a pointer.
 llvmGEPFromPtr ::
+  HasCallStack =>
   L.Type ->
   Int ->
   L.Typed L.Value ->
   BBLLVM arch (L.Typed L.Value)
-llvmGEPFromPtr pointeeType ofs ptrV = do
-  let pointerType = L.PtrTo pointeeType
+llvmGEPFromPtr returnType ofs ptrV = do
   let
+    pointeeType =
+      case L.typedType ptrV of
+        L.PtrTo ty -> ty
+        ty -> error $ "llvmGEPFromPtr: expecter pointer type, got: " <> show ty
     zeroV = L.Typed (L.iT 32) (L.int 0)
     ofsV = L.Typed (L.iT 32) (L.int ofs)
   -- https://llvm.org/docs/GetElementPtr.html#what-is-the-first-index-of-the-gep-instruction
-  L.Typed pointerType <$> evalInstr (L.GEP False pointeeType ptrV [zeroV, ofsV])
+  L.Typed returnType <$> evalInstr (L.GEP False pointeeType ptrV [zeroV, ofsV])
 
 -- | Truncate and log.
 llvmTrunc ::
